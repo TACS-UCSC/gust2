@@ -94,3 +94,32 @@ Design choices
 - Compound reconstruction loss: decoder runs at every scale (gust implementation lacks this).
 - One-hot matmul for codebook lookups: sharding-safe, no fancy indexing.
 - Scale loop is Python for (6 iters, unrolled): fori_loop lacks rev-mode grad, scan needs fixed shapes.
+
+Pipeline Overview
+=================
+VQ-VAE → Tokenizer → AR Pushforward
+
+1. Train VQ-VAE (train.py): encodes 256x256 fields into multi-scale discrete tokens
+2. Tokenize (tokenizer.py): encode full dataset to compact indices + per-scale masks
+3. Train AR model (future): prefix LM pushforward autoregression on token sequences
+
+Model Sizes (d=512, mlp=1024, heads=8, batch=64)
+-------------------------------------------------
+Small:  enc/dec depth  5/5,   31M params, 1 GPU
+Medium: enc/dec depth 10/10,  57M params, 2 GPUs
+Large:  enc/dec depth 20/20, 109M params, 4 GPUs
+
+Best codebook config: codebook_dim=512, codebook_size=4096
+
+Scale Configurations
+--------------------
+sc341:  scales 1, 2, 4, 8, 16          →   341 tokens/sample
+sc917:  scales 1, 2, 4, 8, 16, 24      →   917 tokens/sample
+sc1941: scales 1, 2, 4, 8, 16, 24, 32  → 1,941 tokens/sample
+
+Experiments Directory (Bridges2)
+--------------------------------
+/ocean/projects/mth260004p/sambamur/experiments/
+  vqvae/          VQ-VAE checkpoints  ({size}-sc{tokens}/)
+  tokens/         Tokenized datasets  ({size}-sc{tokens}.npz)
+  ar/             AR pushforward models (future)

@@ -17,9 +17,52 @@ uv pip install 'jax[cuda13]' equinox optax h5py matplotlib wandb
 - **Account**: `mth260004p`
 - **Code**: `/ocean/projects/mth260004p/sambamur/gust` (alias: `gust`)
 - **Data**: `/ocean/projects/mth260004p/sambamur/data_lowres/output.h5`
-- **Checkpoints/sweeps/wandb**: all under `/ocean/projects/mth260004p/sambamur/`
+- **All storage**: under `/ocean/projects/mth260004p/sambamur/` — see Experiments layout below
 - **GPUs**: H100-80GB. GPU-shared partition (1-4 GPUs), GPU partition (8 GPUs).
 - **Scheduler**: Slurm. Max walltime 2 days. See `scripts/` for job templates.
+
+## Experiments Layout
+
+All experiment artifacts live on Ocean storage. Naming uses token count (sc341/sc917/sc1941) for unambiguous identification across the pipeline.
+
+```
+/ocean/projects/mth260004p/sambamur/
+├── gust/                              # code repo
+├── data_lowres/output.h5              # raw turbulence data (20k × 256×256)
+├── wandb/                             # wandb logs (all projects)
+├── sweeps/codebook/                   # codebook hyperparam sweep (Phase 1)
+└── experiments/
+    ├── vqvae/                         # VQ-VAE checkpoints
+    │   ├── small-sc341/               # D=5, scales 1,2,4,8,16
+    │   ├── small-sc917/               # D=5, scales 1,2,4,8,16,24
+    │   ├── small-sc1941/              # D=5, scales 1,2,4,8,16,24,32
+    │   ├── medium-sc*/                # D=10 (future)
+    │   └── large-sc*/                 # D=20 (future)
+    ├── tokens/                        # tokenized datasets (.npz)
+    │   ├── small-sc341.npz
+    │   ├── small-sc917.npz
+    │   └── small-sc1941.npz
+    └── ar/                            # AR pushforward models (future)
+        ├── small-sc341-ar*/
+        └── ...
+```
+
+### Scale Configurations
+
+| Config | Scales | Tokens/sample |
+|--------|--------|---------------|
+| sc341 | 1, 2, 4, 8, 16 | 341 |
+| sc917 | 1, 2, 4, 8, 16, 24 | 917 |
+| sc1941 | 1, 2, 4, 8, 16, 24, 32 | 1,941 |
+
+### Wandb Projects
+
+- `gust2-vqvae`: codebook hyperparameter sweeps
+- `gust2-experiments`: final training runs (groups: small, medium, large)
+
+### Best Codebook Config (from sweep)
+
+`codebook_dim=512, codebook_size=4096, beta=0.25, ema_decay=0.90`
 
 ## Mixed Precision
 
