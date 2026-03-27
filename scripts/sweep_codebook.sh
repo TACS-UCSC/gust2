@@ -79,6 +79,9 @@ for CDIM in ${CODEBOOK_DIMS}; do
         RUN_NAME="cd${CDIM}-K${CSZ}"
         CHECKPOINT_DIR="${SWEEP_BASE}/${RUN_NAME}"
 
+        # Ensure output dirs exist before sbatch (Slurm needs them at submit time)
+        mkdir -p "${CHECKPOINT_DIR}" "${SWEEP_BASE}/logs" "${WANDB_BASE}"
+
         # Auto-detect resume
         RESUME_FLAG=""
         if [ -f "${CHECKPOINT_DIR}/training_state.json" ]; then
