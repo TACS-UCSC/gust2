@@ -29,7 +29,7 @@ ROPE_THETA=32.0
 
 # ---------- Fixed training config ----------
 BATCH_SIZE=64
-EPOCHS=50
+EPOCHS=100
 LR=1e-4
 BETA=0.25
 EMA_DECAY=0.90
