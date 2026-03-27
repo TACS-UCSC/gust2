@@ -39,8 +39,8 @@ WANDB_PROJECT="gust2-vqvae"
 WANDB_GROUP="codebook-sweep"
 
 # ---------- Sweep grid ----------
-CODEBOOK_DIMS="64 128"
-CODEBOOK_SIZES="256 512 1024 2048 4096"
+CODEBOOK_DIMS="256 512"
+CODEBOOK_SIZES="4096"
 
 DRY_RUN=false
 
