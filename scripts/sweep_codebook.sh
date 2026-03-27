@@ -100,7 +100,12 @@ for CDIM in ${CODEBOOK_DIMS}; do
 
 # ---------- Setup ----------
 cd "${REPODIR}"
-source .venv/bin/activate
+source /ocean/projects/mth260004p/sambamur/.venvs/gust/bin/activate
+module load cuda/12.6.1
+
+# cuDNN and NVIDIA libs from pip packages
+NVIDIA_LIBS=\$(python -c "import nvidia; print(nvidia.__path__[0])")
+export LD_LIBRARY_PATH=\$(find \$NVIDIA_LIBS -name "lib" -type d | tr '\\n' ':'):\$LD_LIBRARY_PATH
 
 mkdir -p "${CHECKPOINT_DIR}"
 mkdir -p "${SWEEP_BASE}/logs"
