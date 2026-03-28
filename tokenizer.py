@@ -653,6 +653,8 @@ def parse_args():
     common.add_argument("--field", default="omega",
                         help="HDF5 field name under /fields/")
     common.add_argument("--batch_size", type=int, default=128)
+    common.add_argument("--sample_start", type=int, default=0)
+    common.add_argument("--sample_stop", type=int, default=None)
     common.add_argument("--seed", type=int, default=42)
     common.add_argument("--first_trainable_scale", type=int, default=None)
 
@@ -685,7 +687,9 @@ def main():
     def make_dataset():
         return VQVAEDataset(
             path=args.data_path, field=args.field,
-            batch_size=args.batch_size, shuffle=False)
+            batch_size=args.batch_size, shuffle=False,
+            sample_start=args.sample_start,
+            sample_stop=args.sample_stop)
 
     dataset = make_dataset()
     print(f"Dataset: {dataset.n_samples} samples, shape {dataset.sample_shape}")
