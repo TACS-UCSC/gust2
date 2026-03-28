@@ -21,9 +21,10 @@ class VQVAEDataset:
     """
 
     def __init__(self, path: str, field: str = "omega", batch_size: int = 16,
-                 shuffle: bool = True, seed: int = 42, mesh=None):
+                 shuffle: bool = True, seed: int = 42, mesh=None,
+                 sample_start: int = 0, sample_stop: int = None):
         with h5py.File(path, "r") as f:
-            self.data = f[f"fields/{field}"][:]              # (N, H, W) float32
+            self.data = f[f"fields/{field}"][sample_start:sample_stop]  # (N, H, W) float32
 
         # Add channel dim: (N, H, W) -> (N, 1, H, W)
         self.data = self.data[:, None, :, :]

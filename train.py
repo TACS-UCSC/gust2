@@ -44,6 +44,11 @@ def parse_args():
     parser.add_argument("--beta", type=float, default=0.25, help="Commitment loss weight")
     parser.add_argument("--ema_decay", type=float, default=0.99, help="EMA decay for codebook")
     parser.add_argument("--seed", type=int, default=42)
+    # Data slicing
+    parser.add_argument("--sample_start", type=int, default=0,
+                        help="First sample index (default: 0)")
+    parser.add_argument("--sample_stop", type=int, default=None,
+                        help="Stop sample index, exclusive (default: all)")
     # Checkpointing
     parser.add_argument("--checkpoint_dir", type=str, default="./checkpoints")
     parser.add_argument("--resume", action="store_true",
@@ -206,6 +211,8 @@ def main():
         shuffle=True,
         seed=args.seed,
         mesh=mesh,
+        sample_start=args.sample_start,
+        sample_stop=args.sample_stop,
     )
     print(f"Dataset: {dataset.n_samples} samples, shape {dataset.sample_shape}")
 

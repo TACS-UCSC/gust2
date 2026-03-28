@@ -31,8 +31,9 @@ ROPE_THETA=32.0
 BATCH_SIZE=64
 EPOCHS=100
 LR=1e-4
-BETA=0.25
-EMA_DECAY=0.90
+BETA=0.1
+EMA_DECAY=0.85
+SAMPLE_STOP=20000
 SEED=42
 WANDB_PROJECT="gust2-experiments"
 
@@ -138,6 +139,7 @@ python train.py \\
     --lr ${LR} \\
     --beta ${BETA} \\
     --ema_decay ${EMA_DECAY} \\
+    --sample_stop ${SAMPLE_STOP} \\
     --seed ${SEED} \\
     --wandb_project ${WANDB_PROJECT} \\
     --wandb_name ${RUN_NAME} \\
