@@ -55,11 +55,9 @@ VAR-style multi-scale residual vector quantization.
 
 Components
 ----------
-area_downsample(x, h, w)
-    (D, H, W) -> (D, h, w) via reshape + mean. Integer scale factors only.
-
-bicubic_upsample(x, h, w)
+bicubic_resize(x, h, w)
     (D, H_in, W_in) -> (D, h, w) via jax.image.resize(method="bicubic").
+    Used for both up and downsampling. Supports arbitrary scale sizes.
 
 quantize(z_flat, codebook)
     (N, D), (K, D) -> (z_q, indices, commit_loss)

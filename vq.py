@@ -7,20 +7,8 @@ from typing import NamedTuple
 # ---------- Helpers ----------
 
 
-def area_downsample(x: jax.Array, h: int, w: int) -> jax.Array:
-    """Downsample (D, H, W) -> (D, h, w) via area averaging.
-
-    Reshapes one axis at a time so automatic sharding (set_mesh) can
-    propagate without hitting the multi-axis split restriction.
-    """
-    D, H, W = x.shape
-    x = x.reshape(D, h, H // h, W).mean(axis=2)     # (D, h, W)
-    x = x.reshape(D, h, w, W // w).mean(axis=3)     # (D, h, w)
-    return x
-
-
-def bicubic_upsample(x: jax.Array, h: int, w: int) -> jax.Array:
-    """Upsample (D, H_in, W_in) -> (D, h, w) via bicubic interpolation."""
+def bicubic_resize(x: jax.Array, h: int, w: int) -> jax.Array:
+    """Resize (D, H_in, W_in) -> (D, h, w) via bicubic interpolation."""
     return jax.image.resize(x, (x.shape[0], h, w), method="bicubic")
 
 
@@ -107,8 +95,8 @@ class MultiScaleVQ(eqx.Module):
         commit_loss = 0.0
 
         for k, s in enumerate(self.scales):
-            f_hat = bicubic_upsample(f_hat, s, s)
-            res = area_downsample(z_e, s, s) - f_hat
+            f_hat = bicubic_resize(f_hat, s, s)
+            res = bicubic_resize(z_e, s, s) - f_hat
             res_flat = res.reshape(D, s * s).T                   # (s², D)
 
             z_q_flat, indices, commit = quantize(res_flat, codebook)
@@ -116,7 +104,7 @@ class MultiScaleVQ(eqx.Module):
             z_q = self.phi_convs[k](z_q)
             f_hat = f_hat + z_q
 
-            partial = bicubic_upsample(f_hat, self.full_size, self.full_size)
+            partial = bicubic_resize(f_hat, self.full_size, self.full_size)
             partial = self.post_quant_conv(partial)
             partials.append(partial)
 

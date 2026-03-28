@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from vit_ae import Encoder, Decoder
-from vq import MultiScaleVQ, EMAState, bicubic_upsample
+from vq import MultiScaleVQ, EMAState, bicubic_resize
 
 
 # ---------- JIT helpers ----------
@@ -116,13 +116,13 @@ def reconstruct_from_indices(indices_list, codebook, vq):
     f_hat = jnp.zeros((D, 1, 1))
 
     for k, s in enumerate(vq.scales):
-        f_hat = bicubic_upsample(f_hat, s, s)
+        f_hat = bicubic_resize(f_hat, s, s)
         z_q_flat = jax.nn.one_hot(indices_list[k], K) @ codebook  # (s², D)
         z_q_k = z_q_flat.T.reshape(D, s, s)
         z_q_k = vq.phi_convs[k](z_q_k)
         f_hat = f_hat + z_q_k
 
-    z_q = bicubic_upsample(f_hat, vq.full_size, vq.full_size)
+    z_q = bicubic_resize(f_hat, vq.full_size, vq.full_size)
     z_q = vq.post_quant_conv(z_q)
     return z_q
 

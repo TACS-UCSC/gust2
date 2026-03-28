@@ -1,11 +1,12 @@
 #!/bin/bash
-# Launch scale configuration sweep.
-# 3 configs at different token counts, all on the small model (D=5).
+# Launch scale configuration sweep for a given model size.
 #
 # Usage:
-#   ./scripts/sweep_scales.sh              Submit all 3 jobs
-#   ./scripts/sweep_scales.sh --dry-run    Print without submitting
-#   ./scripts/sweep_scales.sh --list       List configs
+#   ./scripts/sweep_scales.sh small          Submit 3 jobs (1 GPU each)
+#   ./scripts/sweep_scales.sh medium         Submit 3 jobs (2 GPUs each)
+#   ./scripts/sweep_scales.sh large          Submit 3 jobs (4 GPUs each)
+#   ./scripts/sweep_scales.sh small --dry-run
+#   ./scripts/sweep_scales.sh --list
 
 set -euo pipefail
 
@@ -17,17 +18,15 @@ EXPERIMENT_BASE="${OCEAN}/experiments/vqvae"
 WANDB_BASE="${OCEAN}/wandb"
 ACCOUNT="mth260004p"
 
-# ---------- Fixed model config (small, D=5, best codebook from sweep) ----------
+# ---------- Shared model config ----------
 D_MODEL=512
 N_HEADS=8
 MLP_DIM=1024
-ENCODER_DEPTH=5
-DECODER_DEPTH=5
 CODEBOOK_DIM=512
 CODEBOOK_SIZE=4096
 ROPE_THETA=32.0
 
-# ---------- Fixed training config ----------
+# ---------- Shared training config ----------
 BATCH_SIZE=64
 EPOCHS=100
 LR=1e-4
@@ -37,47 +36,93 @@ SAMPLE_STOP=20000
 SEED=42
 WANDB_PROJECT="gust2-experiments"
 
-# ---------- Scale configs ----------
-# name:scales:tokens
-CONFIGS=(
-    "small-sc341:1,2,4,8,16:341"
-    "small-sc917:1,2,4,8,16,24:917"
-    "small-sc1941:1,2,4,8,16,24,32:1941"
+# ---------- Scale configs (shared across all sizes) ----------
+SCALE_CONFIGS=(
+    "sc341:1,2,4,8,16:341"
+    "sc917:1,2,4,8,16,24:917"
+    "sc1941:1,2,4,8,16,24,32:1941"
 )
 
-DRY_RUN=false
+# ---------- Model size definitions ----------
+set_model_size() {
+    case "$1" in
+        small)
+            ENCODER_DEPTH=5; DECODER_DEPTH=5; N_GPUS=1
+            WANDB_GROUP="small"
+            ;;
+        medium)
+            ENCODER_DEPTH=10; DECODER_DEPTH=10; N_GPUS=2
+            WANDB_GROUP="medium"
+            ;;
+        large)
+            ENCODER_DEPTH=20; DECODER_DEPTH=20; N_GPUS=4
+            WANDB_GROUP="large"
+            ;;
+        *)
+            echo "Unknown size: $1. Use small, medium, or large." >&2
+            exit 1
+            ;;
+    esac
+
+    if [ "${N_GPUS}" -le 4 ]; then
+        PARTITION="GPU-shared"
+    else
+        PARTITION="GPU"
+    fi
+}
 
 # ---------- Parse args ----------
+DRY_RUN=false
+MODEL_SIZE=""
+
 for arg in "$@"; do
     case "${arg}" in
         --dry-run) DRY_RUN=true ;;
         --list)
-            echo "Scale sweep configs:"
-            for cfg in "${CONFIGS[@]}"; do
-                IFS=: read -r name scales tokens <<< "${cfg}"
-                echo "  ${name}: scales=(${scales}), ${tokens} tokens/sample"
+            echo "Scale configs (applied to each model size):"
+            for cfg in "${SCALE_CONFIGS[@]}"; do
+                IFS=: read -r sc scales tokens <<< "${cfg}"
+                echo "  ${sc}: scales=(${scales}), ${tokens} tokens/sample"
             done
+            echo ""
+            echo "Model sizes:"
+            echo "  small:  depth 5+5,   1 GPU"
+            echo "  medium: depth 10+10, 2 GPUs"
+            echo "  large:  depth 20+20, 4 GPUs"
             exit 0
             ;;
         --help|-h)
-            echo "Usage: $0 [--dry-run] [--list]"
+            echo "Usage: $0 <small|medium|large> [--dry-run] [--list]"
             exit 0
+            ;;
+        small|medium|large)
+            MODEL_SIZE="${arg}"
             ;;
     esac
 done
 
+if [ -z "${MODEL_SIZE}" ]; then
+    echo "Error: specify model size (small, medium, or large)"
+    echo "Usage: $0 <small|medium|large> [--dry-run]"
+    exit 1
+fi
+
+set_model_size "${MODEL_SIZE}"
+
 echo "=========================================="
-echo "Scale Sweep"
-echo "Model: D=5 (small), d=${D_MODEL}, cdim=${CODEBOOK_DIM}, K=${CODEBOOK_SIZE}"
-echo "Configs: ${#CONFIGS[@]}"
-echo "Dry run: ${DRY_RUN}"
+echo "Scale Sweep: ${MODEL_SIZE}"
+echo "  depth=${ENCODER_DEPTH}+${DECODER_DEPTH}, ${N_GPUS} GPU(s)"
+echo "  d=${D_MODEL}, cdim=${CODEBOOK_DIM}, K=${CODEBOOK_SIZE}"
+echo "  beta=${BETA}, decay=${EMA_DECAY}, batch=${BATCH_SIZE}"
+echo "  Dry run: ${DRY_RUN}"
 echo "=========================================="
 echo ""
 
 N_SUBMITTED=0
 
-for cfg in "${CONFIGS[@]}"; do
-    IFS=: read -r RUN_NAME SCALES TOKENS <<< "${cfg}"
+for cfg in "${SCALE_CONFIGS[@]}"; do
+    IFS=: read -r SC SCALES TOKENS <<< "${cfg}"
+    RUN_NAME="${MODEL_SIZE}-${SC}"
     CHECKPOINT_DIR="${EXPERIMENT_BASE}/${RUN_NAME}"
 
     # Ensure output dirs exist before sbatch
@@ -95,10 +140,10 @@ for cfg in "${CONFIGS[@]}"; do
 #!/bin/bash
 #SBATCH -J ${RUN_NAME}
 #SBATCH -A ${ACCOUNT}
-#SBATCH -p GPU-shared
+#SBATCH -p ${PARTITION}
 #SBATCH -N 1
-#SBATCH --gres=gpu:h100-80:1
-#SBATCH -t 12:00:00
+#SBATCH --gres=gpu:h100-80:${N_GPUS}
+#SBATCH -t 2-00:00:00
 #SBATCH -o ${EXPERIMENT_BASE}/logs/${RUN_NAME}-%j.out
 #SBATCH -e ${EXPERIMENT_BASE}/logs/${RUN_NAME}-%j.err
 
@@ -115,8 +160,9 @@ echo "=========================================="
 echo "Job:       \${SLURM_JOB_ID}"
 echo "Node:      \$(hostname)"
 echo "Started:   \$(date)"
-echo "GPUs:      \$(nvidia-smi -L 2>/dev/null | wc -l)"
+echo "GPUs:      ${N_GPUS}"
 echo "Run:       ${RUN_NAME}"
+echo "Model:     ${MODEL_SIZE} (${ENCODER_DEPTH}+${DECODER_DEPTH})"
 echo "Scales:    ${SCALES} (${TOKENS} tokens/sample)"
 echo "Ckpt dir:  ${CHECKPOINT_DIR}"
 echo "Resume:    ${RESUME_FLAG:-no}"
@@ -143,7 +189,7 @@ python train.py \\
     --seed ${SEED} \\
     --wandb_project ${WANDB_PROJECT} \\
     --wandb_name ${RUN_NAME} \\
-    --wandb_group small \\
+    --wandb_group ${WANDB_GROUP} \\
     --wandb_dir "${WANDB_BASE}" \\
     ${RESUME_FLAG}
 
@@ -153,9 +199,9 @@ echo "=========================================="
 SBATCH_EOF
 
     if [ "${DRY_RUN}" = true ]; then
-        echo "[dry-run] ${RUN_NAME}: scales=(${SCALES}), ${TOKENS} tokens/sample"
+        echo "[dry-run] ${RUN_NAME}: scales=(${SCALES}), ${TOKENS} tokens, ${N_GPUS} GPU(s)"
     else
-        echo "Submitting ${RUN_NAME}: scales=(${SCALES}), ${TOKENS} tokens/sample..."
+        echo "Submitting ${RUN_NAME}: scales=(${SCALES}), ${TOKENS} tokens, ${N_GPUS} GPU(s)..."
         sbatch "${TMPFILE}"
     fi
     rm -f "${TMPFILE}"
