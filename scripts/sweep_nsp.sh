@@ -178,6 +178,7 @@ for VQVAE_NAME in "${VQVAE_NAMES[@]}"; do
 #SBATCH -N 1
 #SBATCH --gres=gpu:h100-80:${N_GPUS}
 #SBATCH -t 2-00:00:00
+#SBATCH --exclude=w009
 #SBATCH -o ${AR_BASE}/logs/${RUN_NAME}-%j.out
 #SBATCH -e ${AR_BASE}/logs/${RUN_NAME}-%j.err
 
