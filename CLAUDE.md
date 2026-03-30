@@ -76,7 +76,19 @@ Master weights in f32. Forward/backward in bf16 via `_cast_to_half()` in `train.
 | Medium | 10 / 10 | 57M | 2 | ~51 GB |
 | Large | 20 / 20 | 109M | 4 | ~51 GB |
 
+## Pipeline
+
+```
+VQ-VAE (train.py) → Tokenizer (tokenizer.py) → AR NSP (train_nsp.py)
+```
+
+1. Train VQ-VAE: encodes 256×256 fields into multi-scale discrete tokens
+2. Tokenize: encode dataset to compact indices + per-scale masks (.npz)
+3. Train NSP: teacher-forced next-scale prediction on consecutive frame pairs
+
 ## Architecture
+
+### VQ-VAE
 
 Three modules compose the full model, passed as a `(encoder, decoder, vq)` tuple:
 
@@ -94,3 +106,16 @@ Three modules compose the full model, passed as a `(encoder, decoder, vq)` tuple
 - **Scale loop is unrolled Python `for`** (6 iterations): `lax.fori_loop` lacks rev-mode grad support, `lax.scan` requires fixed shapes across scales.
 - **Kernel 4 on transposed convolutions**: kernel 3 + stride 2 produces odd output dims.
 - **Compound loss** (`vqvae_loss`): decoder runs K times on progressively refined latents — distinguishes this from the earlier "gust" implementation.
+
+### NSP (Next-Scale Prediction)
+
+- **`nsp_model.py`** — VAR-style autoregressive transformer. `NSPModel` is the transformer backbone (RMSNorm, QK-norm, bias-free, SwiGLU, 2D axial RoPE with cell-center coords). `ExpansionHeads` predict each scale k from scale k-1's bilinear-upsampled hidden states + learned 2D position encoding. All heads output `effective_vocab` logits, masked by per-scale `scale_masks`. `forward_teacher_forced()` handles asymmetric [full t0, truncated t1] sequences. Codebook lookup uses one-hot matmul (sharding-safe).
+
+- **`train_nsp.py`** — Teacher-forced training. Pairs consecutive frames (t0, t1). Uses same SPMD sharding pattern as VQ-VAE (`set_mesh` + `filter_jit`, not pmap). Mixed precision via `_cast_to_half`. Cross-entropy loss per scale, weighted by `1/sqrt(token_count)`. Attention mask: t0→t0 full, t0→t1 blocked, t1→t0 full, t1→t1 source_scale ≤ target_scale.
+
+### NSP Design Decisions
+
+- **Unified logit heads**: All expansion heads output `effective_vocab` logits + scale mask, vs gust's per-scale vocab ranges with offsets. Simpler since gust2's tokenizer allows shared codebook entries across scales.
+- **Separate ExpansionHeads module**: Not inside the model. Differentiate w.r.t. `(model, exp_heads)` tuple.
+- **Teacher-forced only**: No masked variant (gust's `train_nsp.py` is not ported).
+- **Codebook in embedding**: Frozen via `stop_gradient`, stored in the model (unlike VQ-VAE where codebook is external EMA state).

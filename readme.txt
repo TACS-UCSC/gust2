@@ -93,13 +93,57 @@ Design choices
 - One-hot matmul for codebook lookups: sharding-safe, no fancy indexing.
 - Scale loop is Python for (6 iters, unrolled): fori_loop lacks rev-mode grad, scan needs fixed shapes.
 
+Next-Scale Prediction (nsp_model.py, train_nsp.py)
+==================================================
+VAR-style teacher-forced autoregression. Predicts t1 tokens conditioned
+on all scales at t0 + coarser scales at t1.
+
+Components
+----------
+NSPConfig
+    Dataclass. Data-derived fields (scales, effective_vocab_size,
+    codebook_dim) populated from tokenized .npz.
+
+NSPEmbedding
+    codebook_proj(codebook_dim, n_embd) + scale_embed + frame_embed.
+    Codebook lookup via one-hot matmul (sharding-safe).
+
+NSPBlock(n_embd, n_head, rope_theta)
+    Pre-norm transformer block matching VQ-VAE conventions:
+    RMSNorm, QK-norm, bias-free, SwiGLU FFN.
+    Accepts attn_bias (L,L) for block-causal masking.
+    Uses 2D axial RoPE with cell-center coordinates (not integer grid).
+
+NSPModel(config, codebook)
+    Embedding -> N x NSPBlock (with gradient checkpoint) -> RMSNorm.
+    Returns hidden states (L, n_embd). No prediction heads.
+
+ExpansionHeads(config)
+    Per trainable scale: Linear(n_embd, effective_vocab).
+    Shared pos_proj: Linear(2, n_embd) for target position encoding.
+    Prediction: hidden[scale k-1] -> bilinear upsample -> + pos_emb -> head -> logits.
+    All heads output effective_vocab logits, masked by scale_masks[k].
+
+forward_teacher_forced(model, tokens, config, ...)
+    Asymmetric sequence: [full t0 padded, truncated t1 padded].
+    t1 excludes last scale (prediction target only).
+
+build_teacher_forced_mask(scales_t0, ..., scales_t1, ...)
+    Attention: t0->t0 full, t0->t1 blocked, t1->t0 full,
+    t1->t1 source_scale <= target_scale.
+
+Training (train_nsp.py)
+    Pairs consecutive frames. Cross-entropy per scale, weighted
+    by 1/sqrt(token_count). SPMD via set_mesh + filter_jit.
+    Mixed precision: _cast_to_half on (model, exp_heads).
+
 Pipeline Overview
 =================
 VQ-VAE → Tokenizer → AR Pushforward
 
 1. Train VQ-VAE (train.py): encodes 256x256 fields into multi-scale discrete tokens
 2. Tokenize (tokenizer.py): encode full dataset to compact indices + per-scale masks
-3. Train AR model (future): prefix LM pushforward autoregression on token sequences
+3. Train NSP (train_nsp.py): teacher-forced next-scale prediction on frame pairs
 
 Model Sizes (d=512, mlp=1024, heads=8, batch=64)
 -------------------------------------------------
@@ -120,4 +164,4 @@ Experiments Directory (Bridges2)
 /ocean/projects/mth260004p/sambamur/experiments/
   vqvae/          VQ-VAE checkpoints  ({size}-sc{tokens}/)
   tokens/         Tokenized datasets  ({size}-sc{tokens}.npz)
-  ar/             AR pushforward models (future)
+  ar/             NSP pushforward models ({size}-sc{tokens}-nsp/)
