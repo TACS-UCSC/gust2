@@ -201,21 +201,6 @@ echo "Ckpt dir:  ${CHECKPOINT_DIR}"
 echo "Resume:    ${RESUME_FLAG:-no}"
 echo "=========================================="
 
-# Save wandb run ID for resume
-python -c "
-import wandb, os
-run = wandb.init(
-    project='${WANDB_PROJECT}',
-    name='${RUN_NAME}',
-    group='${WANDB_GROUP}',
-    dir='${WANDB_BASE}',
-    $([ -n "${RESUME_FLAG}" ] && echo "resume='allow', id=open('${WANDB_ID_FILE}').read().strip() if os.path.exists('${WANDB_ID_FILE}') else None,")
-)
-with open('${WANDB_ID_FILE}', 'w') as f:
-    f.write(run.id)
-wandb.finish()
-" 2>/dev/null || true
-
 python train_nsp.py \\
     --tokens_path "${TOKENS_PATH}" \\
     --n_layer ${N_LAYER} \\
