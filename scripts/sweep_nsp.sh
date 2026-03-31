@@ -48,7 +48,7 @@ VQVAE_NAMES=(
 set_nsp_size() {
     case "$1" in
         small)
-            N_LAYER=4; N_GPUS=2
+            N_LAYER=4; N_GPUS=4
             ;;
         medium)
             N_LAYER=8; N_GPUS=4
