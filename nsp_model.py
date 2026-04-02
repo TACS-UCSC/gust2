@@ -492,6 +492,107 @@ def forward_teacher_forced(model: NSPModel, tokens_full: jax.Array,
 
 
 # =============================================================================
+# Generation (greedy)
+# =============================================================================
+
+
+def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
+                      config: NSPConfig, t0_tokens: jax.Array,
+                      scales_t0: tuple, padded_len_t0: int,
+                      scales_t1: tuple, padded_len_t1: int,
+                      attn_bias: jax.Array, scale_masks: jax.Array,
+                      trainable_indices: list) -> jax.Array:
+    """Generate a full t1 frame from t0, scale by scale (greedy argmax).
+
+    Runs one forward pass per trainable scale. Each scale k is predicted
+    from scale k-1's hidden states, bilinear-upsampled through the
+    expansion head, with invalid tokens masked out via scale_masks.
+
+    Args:
+        model, exp_heads: in inference mode
+        config: NSPConfig
+        t0_tokens: (tokens_per_frame,) compact indices
+        scales_t0: all scale tuples, scales_t1: scales[:-1]
+        padded_len_t0, padded_len_t1: padded lengths
+        attn_bias: (L0+L1, L0+L1) precomputed mask
+        scale_masks: (n_scales, effective_vocab) bool
+        trainable_indices: list of trainable scale indices
+
+    Returns:
+        (tokens_per_frame,) predicted t1 compact indices
+    """
+    boundaries = config.scale_boundaries
+    tokens_per_frame = config.tokens_per_frame
+    tokens_t1_trunc = sum(h * w for h, w in scales_t1)
+
+    boundaries_t0 = [0]
+    for h, w in scales_t0:
+        boundaries_t0.append(boundaries_t0[-1] + h * w)
+
+    boundaries_t1 = [0]
+    for h, w in scales_t1:
+        boundaries_t1.append(boundaries_t1[-1] + h * w)
+
+    t1_tokens = jnp.zeros(tokens_per_frame, dtype=jnp.int32)
+
+    for i, scale_idx in enumerate(trainable_indices):
+        h_k, w_k = config.scales[scale_idx]
+        n_tokens_k = h_k * w_k
+
+        # Build input: [t0_padded, t1_truncated_padded]
+        t1_trunc = t1_tokens[:tokens_t1_trunc]
+        t0_pad = jnp.pad(t0_tokens, (0, padded_len_t0 - tokens_per_frame))
+        t1_pad = jnp.pad(t1_trunc, (0, padded_len_t1 - tokens_t1_trunc))
+        tokens_in = jnp.concatenate([t0_pad, t1_pad])
+
+        hidden = forward_teacher_forced(
+            model, tokens_in, config,
+            scales_t0, padded_len_t0,
+            scales_t1, padded_len_t1,
+            attn_bias,
+        )
+
+        h_t0 = hidden[:padded_len_t0, :]
+        h_t1 = hidden[padded_len_t0:, :]
+
+        # Source hidden states from scale k-1
+        if scale_idx == 0:
+            src_start = boundaries_t0[0]
+            src_end = boundaries_t0[1]
+            h_src, w_src = config.scales[0]
+            h_source = h_t0[src_start:src_end, :]
+        else:
+            src_in_t1 = scale_idx - 1
+            src_start = boundaries_t1[src_in_t1]
+            src_end = boundaries_t1[src_in_t1 + 1]
+            h_src, w_src = scales_t1[src_in_t1]
+            h_source = h_t1[src_start:src_end, :]
+
+        # Bilinear upsample + position encoding
+        h_source_2d = h_source.reshape(h_src, w_src, config.n_embd)
+        h_up = jax.image.resize(
+            h_source_2d, (h_k, w_k, config.n_embd), method='bilinear')
+
+        rows = jnp.arange(h_k, dtype=jnp.float32) / max(h_k - 1, 1)
+        cols = jnp.arange(w_k, dtype=jnp.float32) / max(w_k - 1, 1)
+        grid_r, grid_c = jnp.meshgrid(rows, cols, indexing='ij')
+        coords = jnp.stack([grid_r, grid_c], axis=-1)
+        pos_emb = jax.vmap(jax.vmap(exp_heads.pos_proj))(coords)
+
+        # Expansion head → masked logits → greedy
+        h_flat = (h_up + pos_emb).reshape(n_tokens_k, config.n_embd)
+        logits = jax.vmap(exp_heads.heads[i])(h_flat)
+        logits = jnp.where(scale_masks[scale_idx][None, :], logits, -1e9)
+        predicted = jnp.argmax(logits, axis=-1)
+
+        tgt_start = boundaries[scale_idx]
+        tgt_end = boundaries[scale_idx + 1]
+        t1_tokens = t1_tokens.at[tgt_start:tgt_end].set(predicted)
+
+    return t1_tokens
+
+
+# =============================================================================
 # Factory
 # =============================================================================
 
