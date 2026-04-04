@@ -4,6 +4,7 @@
 # Usage:
 #   ./scripts/tokenize_val.sh              Submit 9 jobs
 #   ./scripts/tokenize_val.sh --dry-run
+#   ./scripts/tokenize_val.sh --force      Overwrite existing val tokens
 
 set -euo pipefail
 
@@ -21,10 +22,12 @@ VQVAE_SIZES=(small medium large)
 SCALE_CONFIGS=(sc341 sc917 sc1941)
 
 DRY_RUN=false
+FORCE=false
 for arg in "$@"; do
     case "${arg}" in
         --dry-run) DRY_RUN=true ;;
-        --help|-h) echo "Usage: $0 [--dry-run]"; exit 0 ;;
+        --force) FORCE=true ;;
+        --help|-h) echo "Usage: $0 [--dry-run] [--force]"; exit 0 ;;
     esac
 done
 
@@ -48,8 +51,14 @@ for SIZE in "${VQVAE_SIZES[@]}"; do
             continue
         fi
 
-        if [ -f "${OUTPUT_PATH}" ]; then
-            echo "[skip] ${RUN_NAME}: already tokenized"
+        TRAIN_TOKENS="${TOKENS_BASE}/${RUN_NAME}.npz"
+        if [ ! -f "${TRAIN_TOKENS}" ] && [ "${DRY_RUN}" = false ]; then
+            echo "[skip] ${RUN_NAME}: training tokens not found"
+            continue
+        fi
+
+        if [ -f "${OUTPUT_PATH}" ] && [ "${FORCE}" = false ]; then
+            echo "[skip] ${RUN_NAME}: already tokenized (use --force to overwrite)"
             continue
         fi
 
@@ -79,7 +88,8 @@ python tokenizer.py save \\
     --output "${OUTPUT_PATH}" \\
     --sample_start ${SAMPLE_START} \\
     --sample_stop ${SAMPLE_STOP} \\
-    --batch_size 128
+    --batch_size 128 \\
+    --fit_from "${TRAIN_TOKENS}"
 
 echo "Done: ${OUTPUT_PATH}"
 SBATCH_EOF
