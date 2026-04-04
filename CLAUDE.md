@@ -39,11 +39,24 @@ All experiment artifacts live on Ocean storage. Naming uses token count (sc341/s
     │   ├── medium-sc*/                # D=10 (future)
     │   └── large-sc*/                 # D=20 (future)
     ├── tokens/                        # tokenized datasets (.npz)
-    │   ├── small-sc341.npz
-    │   ├── small-sc917.npz
-    │   └── small-sc1941.npz
-    └── ar/                            # AR pushforward models (future)
-        ├── small-sc341-ar*/
+    │   ├── small-sc341.npz            # training tokens
+    │   ├── small-sc341-val.npz        # val tokens (--fit_from train)
+    │   └── ...
+    ├── ar/                            # NSP model checkpoints
+    │   ├── small-sc341-nsp-small/
+    │   ├── small-sc341-nsp-medium/
+    │   ├── small-sc341-nsp-large/
+    │   └── ...                        # 27 total (3 NSP sizes × 9 VQ-VAE)
+    ├── rollouts/                      # autoregressive rollout outputs
+    │   ├── small-sc341-nsp-small/rollout_tokens.npz
+    │   └── ...
+    └── analysis/                      # spectral analysis outputs
+        ├── small-sc341-nsp-small/
+        │   ├── analysis_data.npz      # spectra + histogram arrays
+        │   ├── metrics.json           # scalar metrics (RSE, EMD)
+        │   ├── tke_spectrum.png
+        │   ├── enstrophy_spectrum.png
+        │   └── pixel_histogram.png
         └── ...
 ```
 
@@ -59,6 +72,8 @@ All experiment artifacts live on Ocean storage. Naming uses token count (sc341/s
 
 - `gust2-vqvae`: codebook hyperparameter sweeps
 - `gust2-experiments`: final training runs (groups: small, medium, large)
+- `gust2-nsp`: NSP training runs
+- `gust2-analysis`: rollout spectral analysis (spectra, histograms, RSE, EMD)
 
 ### Best Codebook Config (from sweep)
 
@@ -79,12 +94,14 @@ Master weights in f32. Forward/backward in bf16 via `_cast_to_half()` in `train.
 ## Pipeline
 
 ```
-VQ-VAE (train.py) → Tokenizer (tokenizer.py) → AR NSP (train_nsp.py)
+VQ-VAE (train.py) → Tokenizer (tokenizer.py) → AR NSP (train_nsp.py) → Rollout (rollout_nsp.py) → Analysis (analyze_rollout.py)
 ```
 
 1. Train VQ-VAE: encodes 256×256 fields into multi-scale discrete tokens
-2. Tokenize: encode dataset to compact indices + per-scale masks (.npz)
+2. Tokenize: encode dataset to compact indices + per-scale masks (.npz). Validation tokens must use `--fit_from <train.npz>` to share the training data's compact index mapping.
 3. Train NSP: teacher-forced next-scale prediction on consecutive frame pairs
+4. Rollout: autoregressive greedy decoding from a starting frame, saves predicted + GT token sequences
+5. Analysis: decodes rollout tokens to pixel space, computes time-averaged TKE/enstrophy spectra, pixel histograms, relative spectral error, and earth mover's distance. Saves `analysis_data.npz` (spectra + histogram arrays for replotting), `metrics.json` (scalar metrics), plots, and logs to wandb.
 
 ## Architecture
 
