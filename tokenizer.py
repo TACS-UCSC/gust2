@@ -662,6 +662,9 @@ def parse_args():
                                         help="Tokenize and save to file")
     save_parser.add_argument("--output", required=True,
                              help="Output .npz path")
+    save_parser.add_argument("--fit_from", type=str, default=None,
+                             help="Load mapping from existing .npz (e.g. training) "
+                                  "instead of fitting on this data")
 
     info_parser = subparsers.add_parser("info", parents=[common],
                                         help="Show tokenizer stats without saving")
@@ -694,7 +697,22 @@ def main():
     dataset = make_dataset()
     print(f"Dataset: {dataset.n_samples} samples, shape {dataset.sample_shape}")
 
-    tokenizer.fit(dataset)
+    if args.command == "save" and args.fit_from is not None:
+        print(f"Loading mapping from {args.fit_from}...")
+        ref = load_tokenized_data(args.fit_from)
+        tokenizer.set_mapping(
+            old_to_new=jnp.array(ref["old_to_new"]),
+            new_to_old=jnp.array(ref["new_to_old"]),
+            effective_codebook=jnp.array(ref["codebook"]),
+            scale_masks=jnp.array(ref["scale_masks"]),
+        )
+        if "first_trainable_scale" in ref:
+            tokenizer.first_trainable_scale = int(ref["first_trainable_scale"])
+            tokenizer.deterministic_scales = list(range(tokenizer.first_trainable_scale))
+        print(f"  effective_vocab={tokenizer.effective_vocab_size}, "
+              f"codebook_dim={tokenizer.codebook_dim}")
+    else:
+        tokenizer.fit(dataset)
 
     if args.command == "info":
         print_tokenizer_info(tokenizer, dataset.n_samples)
