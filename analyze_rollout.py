@@ -258,23 +258,36 @@ def plot_spectrum(k_centers, gt_spec, vqvae_spec, nsp_spec,
     return fig
 
 
-def plot_histogram(gt_pixels, vqvae_pixels, nsp_pixels, output_path,
-                   n_bins=100):
-    """Plot density-normalized pixel value histograms (3 curves)."""
+def compute_histograms(gt_pixels, vqvae_pixels, nsp_pixels, n_bins=100):
+    """Compute density-normalized histograms for all three sources."""
     bin_min = np.min(gt_pixels)
     bin_max = np.max(gt_pixels)
     margin = (bin_max - bin_min) * 0.01
     bins = np.linspace(bin_min - margin, bin_max + margin, n_bins + 1)
     bin_centers = (bins[:-1] + bins[1:]) / 2
 
+    gt_hist, _ = np.histogram(gt_pixels, bins=bins, density=True)
+    vqvae_hist, _ = np.histogram(vqvae_pixels, bins=bins, density=True)
+    nsp_hist, _ = np.histogram(nsp_pixels, bins=bins, density=True)
+
+    return {
+        "bin_centers": bin_centers,
+        "gt_hist": gt_hist,
+        "vqvae_hist": vqvae_hist,
+        "nsp_hist": nsp_hist,
+    }
+
+
+def plot_histogram(hist_data, output_path):
+    """Plot density-normalized pixel value histograms (3 curves)."""
+    bin_centers = hist_data["bin_centers"]
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    for pixels, label, color, ls in [
-        (gt_pixels, "Ground Truth", "blue", "-"),
-        (vqvae_pixels, "VQ-VAE", "green", "--"),
-        (nsp_pixels, "NSP", "red", ":"),
+    for hist, label, color, ls in [
+        (hist_data["gt_hist"], "Ground Truth", "blue", "-"),
+        (hist_data["vqvae_hist"], "VQ-VAE", "green", "--"),
+        (hist_data["nsp_hist"], "NSP", "red", ":"),
     ]:
-        hist, _ = np.histogram(pixels, bins=bins, density=True)
         ax.step(bin_centers, hist, where="mid",
                 label=label, color=color, linestyle=ls,
                 linewidth=2, alpha=0.8)
@@ -376,6 +389,7 @@ def main():
     gt_pixels = raw_gt[:, 0].ravel()
     vqvae_pixels = vqvae_fields[:, 0].ravel()
     nsp_pixels = nsp_fields[:, 0].ravel()
+    hist_data = compute_histograms(gt_pixels, vqvae_pixels, nsp_pixels)
 
     # --- Metrics ---
     print("Computing metrics...")
@@ -389,14 +403,20 @@ def main():
         "enstrophy_rse_nsp": relative_spectral_error(nsp_ens, gt_ens),
         "emd_vqvae": pixel_emd(vqvae_pixels, gt_pixels),
         "emd_nsp": pixel_emd(nsp_pixels, gt_pixels),
-        "k_centers": k_centers.tolist(),
-        "tke_gt": gt_tke.tolist(),
-        "tke_vqvae": vqvae_tke.tolist(),
-        "tke_nsp": nsp_tke.tolist(),
-        "enstrophy_gt": gt_ens.tolist(),
-        "enstrophy_vqvae": vqvae_ens.tolist(),
-        "enstrophy_nsp": nsp_ens.tolist(),
     }
+
+    # --- Save plot data (spectra + histograms) for later replotting ---
+    data_path = os.path.join(args.output_dir, "analysis_data.npz")
+    np.savez_compressed(data_path,
+        k_centers=k_centers,
+        tke_gt=gt_tke, tke_vqvae=vqvae_tke, tke_nsp=nsp_tke,
+        enstrophy_gt=gt_ens, enstrophy_vqvae=vqvae_ens, enstrophy_nsp=nsp_ens,
+        hist_bin_centers=hist_data["bin_centers"],
+        hist_gt=hist_data["gt_hist"],
+        hist_vqvae=hist_data["vqvae_hist"],
+        hist_nsp=hist_data["nsp_hist"],
+    )
+    print(f"  Saved plot data to {data_path}")
 
     # --- Plots ---
     print("Saving plots...")
@@ -408,8 +428,7 @@ def main():
         "Enstrophy", "Z(k)",
         os.path.join(args.output_dir, "enstrophy_spectrum.png"))
     hist_fig = plot_histogram(
-        gt_pixels, vqvae_pixels, nsp_pixels,
-        os.path.join(args.output_dir, "pixel_histogram.png"))
+        hist_data, os.path.join(args.output_dir, "pixel_histogram.png"))
 
     # --- Save metrics ---
     metrics_path = os.path.join(args.output_dir, "metrics.json")
