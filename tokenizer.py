@@ -176,6 +176,7 @@ class VQVAETokenizer:
         self.new_to_old = None
         self.effective_codebook = None
         self.scale_masks = None
+        self.scale_usage_counts = None
 
     @classmethod
     def from_checkpoint(cls, checkpoint_dir, key, first_trainable_scale=None):
