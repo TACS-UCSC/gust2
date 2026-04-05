@@ -22,7 +22,8 @@ class VQVAEDataset:
 
     def __init__(self, path: str, field: str = "omega", batch_size: int = 16,
                  shuffle: bool = True, seed: int = 42, mesh=None,
-                 sample_start: int = 0, sample_stop: int = None):
+                 sample_start: int = 0, sample_stop: int = None,
+                 drop_last: bool = True):
         with h5py.File(path, "r") as f:
             self.data = f[f"fields/{field}"][sample_start:sample_stop]  # (N, H, W) float32
 
@@ -31,6 +32,7 @@ class VQVAEDataset:
 
         self.batch_size = batch_size
         self.shuffle = shuffle
+        self.drop_last = drop_last
         self.rng = np.random.RandomState(seed)
         self.mesh = mesh
         self.sharding = (
@@ -47,7 +49,9 @@ class VQVAEDataset:
         return self.data.shape[1:]                           # (1, H, W)
 
     def __len__(self) -> int:
-        return self.n_samples // self.batch_size
+        if self.drop_last:
+            return self.n_samples // self.batch_size
+        return (self.n_samples + self.batch_size - 1) // self.batch_size
 
     def __iter__(self):
         indices = np.arange(self.n_samples)

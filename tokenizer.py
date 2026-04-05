@@ -693,7 +693,8 @@ def main():
             path=args.data_path, field=args.field,
             batch_size=args.batch_size, shuffle=False,
             sample_start=args.sample_start,
-            sample_stop=args.sample_stop)
+            sample_stop=args.sample_stop,
+            drop_last=False)
 
     dataset = make_dataset()
     print(f"Dataset: {dataset.n_samples} samples, shape {dataset.sample_shape}")
