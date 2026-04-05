@@ -124,7 +124,12 @@ def main():
     attn_bias = build_teacher_forced_mask(
         scales_t0, padded_t0, scales_t1, padded_t1)
 
-    # Validate start frame
+    # Validate start frame and n_steps
+    max_steps = len(indices) - args.start_frame - 1
+    if args.n_steps > max_steps:
+        print(f"  Clamped n_steps from {args.n_steps} to {max_steps} "
+              f"({len(indices)} frames available)")
+        args.n_steps = max_steps
     max_start = len(indices) - args.n_steps - 1
     if args.start_frame > max_start:
         args.start_frame = max(0, max_start)
