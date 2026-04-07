@@ -278,6 +278,30 @@ def compute_histograms(gt_pixels, vqvae_pixels, nsp_pixels, n_bins=100):
     }
 
 
+def plot_snapshot(gt_field, vqvae_field, nsp_field, timestep):
+    """Plot GT / VQ-VAE / NSP side-by-side for a single timestep.
+
+    Returns the matplotlib figure (does not save to disk).
+    """
+    vmin = gt_field.min()
+    vmax = gt_field.max()
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    for ax, field, label in [
+        (axes[0], gt_field, "Ground Truth"),
+        (axes[1], vqvae_field, "VQ-VAE"),
+        (axes[2], nsp_field, "NSP"),
+    ]:
+        im = ax.imshow(field, cmap="RdBu_r", vmin=vmin, vmax=vmax,
+                        origin="lower")
+        ax.set_title(f"{label} (t={timestep})", fontsize=12)
+        ax.axis("off")
+
+    fig.colorbar(im, ax=axes, shrink=0.8, label="Vorticity")
+    fig.tight_layout()
+    return fig
+
+
 def plot_histogram(hist_data, output_path):
     """Plot density-normalized pixel value histograms (3 curves)."""
     bin_centers = hist_data["bin_centers"]
@@ -454,7 +478,7 @@ def main():
         if args.wandb_group is not None:
             wandb_kwargs["group"] = args.wandb_group
         wandb.init(**wandb_kwargs)
-        wandb.log({
+        log_dict = {
             "tke_rse/vqvae": metrics["tke_rse_vqvae"],
             "tke_rse/nsp": metrics["tke_rse_nsp"],
             "enstrophy_rse/vqvae": metrics["enstrophy_rse_vqvae"],
@@ -464,7 +488,16 @@ def main():
             "tke_spectrum": wandb.Image(tke_fig),
             "enstrophy_spectrum": wandb.Image(ens_fig),
             "pixel_histogram": wandb.Image(hist_fig),
-        })
+        }
+
+        for t in [100, 500, 1000]:
+            if t < n_frames:
+                snap_fig = plot_snapshot(
+                    raw_gt[t, 0], vqvae_fields[t, 0], nsp_fields[t, 0], t)
+                log_dict[f"snapshot/t{t}"] = wandb.Image(snap_fig)
+                plt.close(snap_fig)
+
+        wandb.log(log_dict)
         wandb.finish()
         print("  Logged to wandb")
 
