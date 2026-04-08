@@ -380,9 +380,26 @@ def main():
         (gt_decoded[:, 0] - raw_gt_pairs[:, 0]) ** 2, axis=(1, 2))
     vqvae_rmse = float(np.mean(np.sqrt(vqvae_mse)))
 
+    per_sample_vqvae_rmse = np.sqrt(vqvae_mse)
+
     print(f"\nPixel RMSE (vs raw GT):")
     print(f"  NSP prediction: {mean_rmse:.6f}")
     print(f"  VQ-VAE recon:   {vqvae_rmse:.6f}")
+
+    # --- Save per-timestep metrics ---
+    per_scale_ce_arr = np.stack(all_per_scale_ce)  # (n_pairs, n_trainable)
+    scale_names = [f"{config.scales[idx][0]}x{config.scales[idx][1]}"
+                   for idx in trainable_indices]
+
+    timestep_path = os.path.join(args.output_dir, "eval_per_timestep.npz")
+    np.savez_compressed(timestep_path,
+        cross_entropy=np.array(all_ce),             # (n_pairs,)
+        per_scale_ce=per_scale_ce_arr,               # (n_pairs, n_trainable)
+        scale_names=np.array(scale_names),           # (n_trainable,)
+        pixel_rmse=per_sample_rmse,                  # (n_pairs,)
+        vqvae_pixel_rmse=per_sample_vqvae_rmse,      # (n_pairs,)
+    )
+    print(f"  Saved per-timestep metrics to {timestep_path}")
 
     # --- Save results ---
     results = {
