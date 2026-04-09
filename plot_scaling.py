@@ -70,7 +70,8 @@ def parse_run_name(name):
 # ── Data fetching ────────────────────────────────────────────────────────────
 
 
-def fetch_all_metrics():
+def fetch_rollout_metrics():
+    """Fetch rollout spectral metrics from gust2-analysis + CE/RMSE from gust2-eval."""
     api = wandb.Api()
 
     analysis = {}
@@ -87,8 +88,11 @@ def fetch_all_metrics():
 
     eval_data = {}
     for r in api.runs(f"{ENTITY}/{EVAL_PROJECT}"):
+        name = r.name
+        if not any(sz in name for sz in ["small", "medium", "large"]):
+            continue
         s = r.summary
-        eval_data[r.name] = {
+        eval_data[name] = {
             "cross_entropy": s.get("cross_entropy"),
             "pixel_rmse": s.get("pixel_rmse"),
         }
@@ -111,14 +115,47 @@ def fetch_all_metrics():
         row.update(eval_data.get(name, {}))
         rows.append(row)
 
-    print(f"Fetched {len(rows)} experiments")
+    print(f"Fetched {len(rows)} rollout experiments")
+    return rows
+
+
+def fetch_single_step_metrics():
+    """Fetch all single-step metrics (CE, RMSE, spectra, EMD) from gust2-eval."""
+    api = wandb.Api()
+
+    rows = []
+    for r in api.runs(f"{ENTITY}/{EVAL_PROJECT}"):
+        name = r.name
+        if not any(sz in name for sz in ["small", "medium", "large"]):
+            continue
+        try:
+            vqvae_size, sc_config, nsp_size = parse_run_name(name)
+        except (IndexError, ValueError):
+            continue
+        s = r.summary
+        row = {
+            "name": name,
+            "vqvae_size": vqvae_size,
+            "sc_config": sc_config,
+            "nsp_size": nsp_size,
+            "tokens_per_sample": TOKENS_PER_SAMPLE[sc_config],
+            "total_params": VQVAE_PARAMS[vqvae_size] + NSP_PARAMS[nsp_size],
+            "cross_entropy": s.get("cross_entropy"),
+            "pixel_rmse": s.get("pixel_rmse"),
+            "tke_rse_nsp": s.get("tke_rse/nsp"),
+            "enstrophy_rse_nsp": s.get("enstrophy_rse/nsp"),
+            "emd_nsp": s.get("emd/nsp"),
+        }
+        rows.append(row)
+
+    print(f"Fetched {len(rows)} single-step experiments")
     return rows
 
 
 # ── Plotting ─────────────────────────────────────────────────────────────────
 
 
-def fig_vs_total_params(rows, output_path):
+def fig_vs_total_params(rows, output_path, title="Scaling vs Total Parameters"):
     """3x2 figure: metric vs total params.
     Color = tokens/sample, marker = VQ-VAE size."""
     fig, axes = plt.subplots(3, 2, figsize=(12, 13))
@@ -167,15 +204,14 @@ def fig_vs_total_params(rows, output_path):
                      frameon=True, fancybox=True, shadow=False,
                      edgecolor="0.8", title="Legend", title_fontsize=13)
 
-    fig.suptitle("Scaling vs Total Parameters", fontsize=15, fontweight="bold",
-                 y=0.98)
+    fig.suptitle(title, fontsize=15, fontweight="bold", y=0.98)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved {output_path}")
 
 
-def fig_vs_tokens(rows, output_path):
+def fig_vs_tokens(rows, output_path, title="Scaling vs Sequence Length"):
     """3x2 figure: metric vs tokens/sample.
     Color = NSP size, marker = VQ-VAE size."""
     fig, axes = plt.subplots(3, 2, figsize=(12, 13))
@@ -224,8 +260,7 @@ def fig_vs_tokens(rows, output_path):
                      frameon=True, fancybox=True, shadow=False,
                      edgecolor="0.8", title="Legend", title_fontsize=13)
 
-    fig.suptitle("Scaling vs Sequence Length", fontsize=15, fontweight="bold",
-                 y=0.98)
+    fig.suptitle(title, fontsize=15, fontweight="bold", y=0.98)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -241,13 +276,29 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
-    rows = fetch_all_metrics()
 
-    print("\n--- Figure 1: metric vs total params ---")
-    fig_vs_total_params(rows, os.path.join(args.output_dir, "scaling_vs_params.png"))
+    rollout_rows = fetch_rollout_metrics()
+    single_step_rows = fetch_single_step_metrics()
 
-    print("\n--- Figure 2: metric vs tokens/sample ---")
-    fig_vs_tokens(rows, os.path.join(args.output_dir, "scaling_vs_tokens.png"))
+    print("\n--- Figure 1: rollout metric vs total params ---")
+    fig_vs_total_params(rollout_rows,
+                        os.path.join(args.output_dir, "rollout_vs_params.png"),
+                        title="Rollout Scaling vs Total Parameters")
+
+    print("\n--- Figure 2: rollout metric vs tokens/sample ---")
+    fig_vs_tokens(rollout_rows,
+                  os.path.join(args.output_dir, "rollout_vs_tokens.png"),
+                  title="Rollout Scaling vs Sequence Length")
+
+    print("\n--- Figure 3: single-step metric vs total params ---")
+    fig_vs_total_params(single_step_rows,
+                        os.path.join(args.output_dir, "single_step_vs_params.png"),
+                        title="Single-Step Scaling vs Total Parameters")
+
+    print("\n--- Figure 4: single-step metric vs tokens/sample ---")
+    fig_vs_tokens(single_step_rows,
+                  os.path.join(args.output_dir, "single_step_vs_tokens.png"),
+                  title="Single-Step Scaling vs Sequence Length")
 
     print(f"\nAll plots saved to {args.output_dir}/")
 

@@ -28,12 +28,25 @@ import jax.numpy as jnp
 import equinox as eqx
 import numpy as np
 
+import matplotlib.pyplot as plt
+
 try:
     import wandb
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
 
+from analyze_rollout import (
+    setup_spectral_analysis,
+    compute_tke_spectrum,
+    compute_enstrophy_spectrum,
+    compute_histograms,
+    relative_spectral_error,
+    pixel_emd,
+    plot_spectrum,
+    plot_histogram,
+    plot_snapshot,
+)
 from nsp_model import (
     NSPConfig, create_nsp_model, forward_teacher_forced,
     build_teacher_forced_mask,
@@ -401,6 +414,77 @@ def main():
     )
     print(f"  Saved per-timestep metrics to {timestep_path}")
 
+    # --- Spectral analysis (single-step predictions) ---
+    print("\nComputing spectra...")
+    H, W = 256, 256
+    Kx, Ky, Ksq, k_centers, bin_masks = setup_spectral_analysis(H, W)
+    n_bins_spec = len(k_centers)
+
+    gt_tke = np.zeros(n_bins_spec)
+    gt_ens = np.zeros(n_bins_spec)
+    vqvae_tke = np.zeros(n_bins_spec)
+    vqvae_ens = np.zeros(n_bins_spec)
+    nsp_tke = np.zeros(n_bins_spec)
+    nsp_ens = np.zeros(n_bins_spec)
+
+    log_every_spec = max(1, n_pairs // 10)
+    for i in range(n_pairs):
+        gt_f = raw_gt_pairs[i, 0]
+        vq_f = gt_decoded[i, 0]
+        ns_f = pred_fields[i, 0]
+
+        gt_tke += compute_tke_spectrum(gt_f, Kx, Ky, Ksq, bin_masks)
+        gt_ens += compute_enstrophy_spectrum(gt_f, bin_masks)
+        vqvae_tke += compute_tke_spectrum(vq_f, Kx, Ky, Ksq, bin_masks)
+        vqvae_ens += compute_enstrophy_spectrum(vq_f, bin_masks)
+        nsp_tke += compute_tke_spectrum(ns_f, Kx, Ky, Ksq, bin_masks)
+        nsp_ens += compute_enstrophy_spectrum(ns_f, bin_masks)
+
+        if (i + 1) % log_every_spec == 0 or i == n_pairs - 1:
+            print(f"  {i + 1}/{n_pairs} frames")
+
+    gt_tke /= n_pairs
+    gt_ens /= n_pairs
+    vqvae_tke /= n_pairs
+    vqvae_ens /= n_pairs
+    nsp_tke /= n_pairs
+    nsp_ens /= n_pairs
+
+    # --- Pixel histograms ---
+    print("Computing pixel histograms...")
+    gt_pixels = raw_gt_pairs[:, 0].ravel()
+    vqvae_pixels = gt_decoded[:, 0].ravel()
+    nsp_pixels = pred_fields[:, 0].ravel()
+    hist_data = compute_histograms(gt_pixels, vqvae_pixels, nsp_pixels)
+
+    # --- Spectral metrics ---
+    tke_rse_vqvae = relative_spectral_error(vqvae_tke, gt_tke)
+    tke_rse_nsp = relative_spectral_error(nsp_tke, gt_tke)
+    enstrophy_rse_vqvae = relative_spectral_error(vqvae_ens, gt_ens)
+    enstrophy_rse_nsp = relative_spectral_error(nsp_ens, gt_ens)
+    emd_vqvae = pixel_emd(vqvae_pixels, gt_pixels)
+    emd_nsp = pixel_emd(nsp_pixels, gt_pixels)
+
+    print(f"\nSpectral metrics:")
+    print(f"  TKE RSE:       VQ-VAE={tke_rse_vqvae:.4f}  NSP={tke_rse_nsp:.4f}")
+    print(f"  Enstrophy RSE: VQ-VAE={enstrophy_rse_vqvae:.4f}  "
+          f"NSP={enstrophy_rse_nsp:.4f}")
+    print(f"  Pixel EMD:     VQ-VAE={emd_vqvae:.6f}  NSP={emd_nsp:.6f}")
+
+    # --- Plots ---
+    print("Generating plots...")
+    tke_fig = plot_spectrum(
+        k_centers, gt_tke, vqvae_tke, nsp_tke,
+        "TKE", "E(k)", os.path.join(args.output_dir, "tke_spectrum.png"))
+    ens_fig = plot_spectrum(
+        k_centers, gt_ens, vqvae_ens, nsp_ens,
+        "Enstrophy", "Z(k)",
+        os.path.join(args.output_dir, "enstrophy_spectrum.png"))
+    hist_fig = plot_histogram(
+        hist_data, os.path.join(args.output_dir, "pixel_histogram.png"))
+    snap_fig = plot_snapshot(
+        raw_gt_pairs[0, 0], gt_decoded[0, 0], pred_fields[0, 0], timestep=1)
+
     # --- Save results ---
     results = {
         "n_pairs": n_pairs,
@@ -412,6 +496,12 @@ def main():
             f"{config.scales[idx][0]}x{config.scales[idx][1]}": float(per_scale_means[j])
             for j, idx in enumerate(trainable_indices)
         },
+        "tke_rse_vqvae": tke_rse_vqvae,
+        "tke_rse_nsp": tke_rse_nsp,
+        "enstrophy_rse_vqvae": enstrophy_rse_vqvae,
+        "enstrophy_rse_nsp": enstrophy_rse_nsp,
+        "emd_vqvae": emd_vqvae,
+        "emd_nsp": emd_nsp,
     }
 
     results_path = os.path.join(args.output_dir, "eval_single_step.json")
@@ -446,6 +536,16 @@ def main():
             "cross_entropy": mean_ce,
             "pixel_rmse": mean_rmse,
             "vqvae_pixel_rmse": vqvae_rmse,
+            "tke_rse/vqvae": tke_rse_vqvae,
+            "tke_rse/nsp": tke_rse_nsp,
+            "enstrophy_rse/vqvae": enstrophy_rse_vqvae,
+            "enstrophy_rse/nsp": enstrophy_rse_nsp,
+            "emd/vqvae": emd_vqvae,
+            "emd/nsp": emd_nsp,
+            "tke_spectrum": wandb.Image(tke_fig),
+            "enstrophy_spectrum": wandb.Image(ens_fig),
+            "pixel_histogram": wandb.Image(hist_fig),
+            "snapshot/first_pushforward": wandb.Image(snap_fig),
         }
         for j, idx in enumerate(trainable_indices):
             h, w = config.scales[idx]
@@ -454,6 +554,8 @@ def main():
         wandb.log(log_dict)
         wandb.finish()
         print("  Logged to wandb")
+
+    plt.close("all")
 
 
 if __name__ == "__main__":
