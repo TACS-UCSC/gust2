@@ -29,7 +29,7 @@ ROPE_THETA=16.0
 
 # ---------- Shared training config ----------
 BATCH_SIZE=128
-EPOCHS=100
+EPOCHS=400
 LR=1e-4
 WEIGHT_DECAY=1e-4
 GRAD_CLIP=1.0
@@ -218,6 +218,7 @@ python train_nsp.py \\
     --wandb_project ${WANDB_PROJECT} \\
     --wandb_name ${RUN_NAME} \\
     --wandb_group ${WANDB_GROUP} \\
+    --context_drop_rate 0.1 \\
     --wandb_dir "${WANDB_BASE}" \\
     ${WANDB_ID_FLAG} \\
     ${RESUME_FLAG}

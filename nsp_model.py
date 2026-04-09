@@ -382,7 +382,8 @@ class NSPModel(eqx.Module):
     def __call__(self, tokens: jax.Array, scale_ids: jax.Array,
                  frame_ids: jax.Array, attn_bias: jax.Array,
                  rope_coords: jax.Array,
-                 token_vectors: jax.Array | None = None) -> jax.Array:
+                 token_vectors: jax.Array | None = None,
+                 drop_mask: jax.Array | None = None) -> jax.Array:
         """
         Args:
             tokens: (L,) token indices
@@ -391,12 +392,15 @@ class NSPModel(eqx.Module):
             attn_bias: (L, L) additive attention mask
             rope_coords: (L, 2) row/col coordinates
             token_vectors: optional (L, codebook_dim) pre-looked-up vectors
+            drop_mask: optional (L,) binary mask — 0 zeros out the embedding
 
         Returns:
             (L, n_embd) hidden states
         """
         x = self.embedding(tokens, scale_ids, frame_ids,
                            token_vectors=token_vectors)
+        if drop_mask is not None:
+            x = x * drop_mask[:, None]
 
         for block in self.blocks:
             x = eqx.filter_checkpoint(block)(x, attn_bias, rope_coords)
@@ -454,7 +458,8 @@ def forward_teacher_forced(model: NSPModel, tokens_full: jax.Array,
                            scales_t0: tuple, padded_len_t0: int,
                            scales_t1: tuple, padded_len_t1: int,
                            attn_bias: jax.Array,
-                           token_vectors: jax.Array | None = None
+                           token_vectors: jax.Array | None = None,
+                           drop_mask: jax.Array | None = None,
                            ) -> jax.Array:
     """Forward pass with asymmetric t0 (full) / t1 (truncated) lengths.
 
@@ -488,7 +493,7 @@ def forward_teacher_forced(model: NSPModel, tokens_full: jax.Array,
     rope_coords = jnp.concatenate([coords_t0, coords_t1], axis=0)
 
     return model(tokens_full, scale_ids, frame_ids, attn_bias, rope_coords,
-                 token_vectors=token_vectors)
+                 token_vectors=token_vectors, drop_mask=drop_mask)
 
 
 # =============================================================================

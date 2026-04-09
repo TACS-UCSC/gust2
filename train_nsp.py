@@ -65,6 +65,8 @@ def parse_args():
                         help="Warmup steps (default: min(1000, total//10))")
     parser.add_argument("--max_samples", type=int, default=None,
                         help="Use only first N frames (default: all)")
+    parser.add_argument("--context_drop_rate", type=float, default=0.0,
+                        help="Per-token dropout rate for context (t0 + t1 coarser)")
     # Checkpointing
     parser.add_argument("--checkpoint_dir", type=str, default="./checkpoints_nsp")
     parser.add_argument("--save_every", type=int, default=10,
@@ -136,10 +138,10 @@ def _cast_to_half(x):
 def make_compute_loss(config, scales_t0, padded_len_t0,
                       scales_t1, padded_len_t1,
                       attn_bias, scale_weights, trainable_indices,
-                      scale_masks):
+                      scale_masks, context_drop_rate=0.0):
     """Build the loss function capturing static config.
 
-    Returns: (model, exp_heads, batch_tokens) -> (loss, metrics)
+    Returns: (model, exp_heads, batch_tokens, key) -> (loss, metrics)
     """
     tokens_per_frame = config.tokens_per_frame
 
@@ -159,7 +161,10 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
     # Total tokens in truncated t1
     tokens_t1_trunc = sum(h * w for h, w in scales_t1)
 
-    def compute_loss(model, exp_heads, batch_tokens):
+    # Total sequence length (for dropout mask)
+    seq_len = padded_len_t0 + padded_len_t1
+
+    def compute_loss(model, exp_heads, batch_tokens, key):
         B = batch_tokens.shape[0]
 
         # Split into t0 and t1 (full, for targets)
@@ -176,16 +181,36 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
                          ((0, 0), (0, padded_len_t1 - tokens_t1_trunc)))
         tokens_in = jnp.concatenate([t0_pad, t1_pad], axis=1)
 
+        # Context token dropout
+        if context_drop_rate > 0:
+            drop_keys = jax.random.split(key, B)
+            drop_masks = jax.vmap(
+                lambda k: jax.random.bernoulli(
+                    k, 1.0 - context_drop_rate, shape=(seq_len,))
+            )(drop_keys).astype(jnp.float32)
+        else:
+            drop_masks = None
+
         # Forward pass via vmap (codebook lookup happens per-sample
         # inside the embedding to avoid sharding ambiguity)
-        hidden = jax.vmap(
-            lambda t: forward_teacher_forced(
-                model, t, config,
-                scales_t0, padded_len_t0,
-                scales_t1, padded_len_t1,
-                attn_bias,
-            )
-        )(tokens_in)
+        if drop_masks is not None:
+            hidden = jax.vmap(
+                lambda t, m: forward_teacher_forced(
+                    model, t, config,
+                    scales_t0, padded_len_t0,
+                    scales_t1, padded_len_t1,
+                    attn_bias, drop_mask=m,
+                )
+            )(tokens_in, drop_masks)
+        else:
+            hidden = jax.vmap(
+                lambda t: forward_teacher_forced(
+                    model, t, config,
+                    scales_t0, padded_len_t0,
+                    scales_t1, padded_len_t1,
+                    attn_bias,
+                )
+            )(tokens_in)
         # hidden: (B, L0+L1, n_embd)
 
         h_t0 = hidden[:, :padded_len_t0, :]
@@ -275,19 +300,19 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
 def make_train_step(compute_loss_fn):
     """Build compiled train step.
 
-    Returns: step(model, exp_heads, opt_state, batch, optimizer)
+    Returns: step(model, exp_heads, opt_state, batch, optimizer, key)
              -> (model, exp_heads, opt_state, loss, metrics)
     """
 
     @eqx.filter_jit
-    def step(model, exp_heads, opt_state, batch_tokens, optimizer):
+    def step(model, exp_heads, opt_state, batch_tokens, optimizer, key):
         # Mixed precision: cast to bf16 inside grad boundary
         @eqx.filter_value_and_grad(has_aux=True)
         def loss_and_grad(model_eh):
             m, eh = model_eh
             m_bf16 = _cast_to_half(m)
             eh_bf16 = _cast_to_half(eh)
-            return compute_loss_fn(m_bf16, eh_bf16, batch_tokens)
+            return compute_loss_fn(m_bf16, eh_bf16, batch_tokens, key)
 
         (loss, metrics), grads = loss_and_grad((model, exp_heads))
 
@@ -438,7 +463,7 @@ def main():
         config, scales_t0, padded_len_t0,
         scales_t1, padded_len_t1,
         attn_bias, scale_weights, trainable_indices,
-        scale_masks,
+        scale_masks, context_drop_rate=args.context_drop_rate,
     )
     train_step = make_train_step(compute_loss_fn)
 
@@ -543,9 +568,12 @@ def main():
           f"{steps_per_epoch} steps/epoch, "
           f"{n_trainable} trainable scales")
 
+    drop_key = jax.random.PRNGKey(args.seed + 1)
+
     for epoch in range(start_epoch, args.epochs):
         print(f"\nEpoch {epoch + 1}/{args.epochs}")
         key, loader_key = jax.random.split(key)
+        epoch_drop_key = jax.random.fold_in(drop_key, epoch)
 
         epoch_losses = []
         epoch_scale_losses = {idx: [] for idx in trainable_indices}
@@ -558,8 +586,9 @@ def main():
         )
 
         for batch_idx, batch in enumerate(dataloader):
+            step_key = jax.random.fold_in(epoch_drop_key, batch_idx)
             model, exp_heads, opt_state, loss, metrics = train_step(
-                model, exp_heads, opt_state, batch, optimizer)
+                model, exp_heads, opt_state, batch, optimizer, step_key)
 
             loss_val = float(loss)
             epoch_losses.append(loss_val)
