@@ -69,7 +69,7 @@ for SIZE in "${VQVAE_SIZES[@]}"; do
 #SBATCH -A ${ACCOUNT}
 #SBATCH -p GPU-shared
 #SBATCH -N 1
-#SBATCH --gres=gpu:h100-80:1
+#SBATCH --gres=gpu:v100-32:1
 #SBATCH --exclude=w009
 #SBATCH -t 1:00:00
 #SBATCH -o ${VQVAE_BASE}/logs/tokval-${RUN_NAME}-%j.out
