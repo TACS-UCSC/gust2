@@ -1,8 +1,9 @@
 """Autoregressive rollout for teacher-forced NSP model.
 
 Given a starting frame from validation tokens, autoregressively predicts
-N steps using greedy decoding, saving the predicted token sequence.
-Decoding to fields is done separately during analysis.
+N steps using greedy decoding (default) or temperature sampling, saving
+the predicted token sequence. Decoding to fields is done separately
+during analysis.
 
 Outputs:
   - rollout_tokens.npz: predicted tokens (flat indices, per-scale indices)
@@ -47,6 +48,8 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, required=True,
                         help="Output directory")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--temperature", type=float, default=0.0,
+                        help="Sampling temperature; 0 = greedy argmax")
     return parser.parse_args()
 
 
@@ -135,28 +138,36 @@ def main():
         args.start_frame = max(0, max_start)
         print(f"  Clamped start_frame to {args.start_frame}")
 
-    # JIT the generation function
+    # JIT the generation function (temperature captured as closure so the
+    # argmax-vs-sample Python branch resolves at trace time).
+    temperature = args.temperature
+
     @jax.jit
-    def generate_step(t0_tokens):
+    def generate_step(t0_tokens, key):
         return generate_t1_frame(
             model, exp_heads, config, t0_tokens,
             scales_t0, padded_t0, scales_t1, padded_t1,
             attn_bias, scale_masks, trainable_indices,
+            key, temperature,
         )
 
     # --- Rollout ---
-    print(f"\nRolling out {args.n_steps} steps from frame {args.start_frame}...")
+    decode_desc = "greedy" if temperature == 0.0 else f"T={temperature}"
+    print(f"\nRolling out {args.n_steps} steps from frame {args.start_frame} "
+          f"({decode_desc})...")
     t0_tokens = jnp.array(indices[args.start_frame])
 
     rollout_tokens = [np.array(t0_tokens)]
     gt_tokens_list = [np.array(indices[args.start_frame])]
     all_accuracies = []
 
+    step_keys = jax.random.split(jax.random.PRNGKey(args.seed), args.n_steps)
+
     log_every = 1 if args.n_steps <= 20 else (10 if args.n_steps <= 200 else 50)
     t_start = time.time()
 
     for step in range(args.n_steps):
-        t1_pred = generate_step(t0_tokens)
+        t1_pred = generate_step(t0_tokens, step_keys[step])
         t1_pred.block_until_ready()
 
         # Accuracy vs ground truth

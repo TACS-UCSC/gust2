@@ -506,12 +506,18 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
                       scales_t0: tuple, padded_len_t0: int,
                       scales_t1: tuple, padded_len_t1: int,
                       attn_bias: jax.Array, scale_masks: jax.Array,
-                      trainable_indices: list) -> jax.Array:
-    """Generate a full t1 frame from t0, scale by scale (greedy argmax).
+                      trainable_indices: list,
+                      key: jax.Array,
+                      temperature: float = 0.0) -> jax.Array:
+    """Generate a full t1 frame from t0, scale by scale.
 
     Runs one forward pass per trainable scale. Each scale k is predicted
     from scale k-1's hidden states, bilinear-upsampled through the
     expansion head, with invalid tokens masked out via scale_masks.
+
+    Decoding:
+        temperature == 0.0 -> greedy argmax (deterministic, key unused)
+        temperature > 0.0  -> ancestral sampling from softmax(logits / T)
 
     Args:
         model, exp_heads: in inference mode
@@ -522,6 +528,8 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
         attn_bias: (L0+L1, L0+L1) precomputed mask
         scale_masks: (n_scales, effective_vocab) bool
         trainable_indices: list of trainable scale indices
+        key: PRNGKey used for sampling (ignored when temperature == 0)
+        temperature: sampling temperature; 0 disables sampling
 
     Returns:
         (tokens_per_frame,) predicted t1 compact indices
@@ -539,6 +547,11 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
         boundaries_t1.append(boundaries_t1[-1] + h * w)
 
     t1_tokens = jnp.zeros(tokens_per_frame, dtype=jnp.int32)
+
+    if temperature == 0.0:
+        scale_keys = [None] * len(trainable_indices)
+    else:
+        scale_keys = list(jax.random.split(key, len(trainable_indices)))
 
     for i, scale_idx in enumerate(trainable_indices):
         h_k, w_k = config.scales[scale_idx]
@@ -584,11 +597,15 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
         coords = jnp.stack([grid_r, grid_c], axis=-1)
         pos_emb = jax.vmap(jax.vmap(exp_heads.pos_proj))(coords)
 
-        # Expansion head → masked logits → greedy
+        # Expansion head → masked logits → argmax or sample
         h_flat = (h_up + pos_emb).reshape(n_tokens_k, config.n_embd)
         logits = jax.vmap(exp_heads.heads[i])(h_flat)
         logits = jnp.where(scale_masks[scale_idx][None, :], logits, -1e9)
-        predicted = jnp.argmax(logits, axis=-1)
+        if temperature == 0.0:
+            predicted = jnp.argmax(logits, axis=-1)
+        else:
+            predicted = jax.random.categorical(
+                scale_keys[i], logits / temperature, axis=-1)
 
         tgt_start = boundaries[scale_idx]
         tgt_end = boundaries[scale_idx + 1]
