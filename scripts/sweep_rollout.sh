@@ -98,7 +98,7 @@ for VQVAE_NAME in "${VQVAE_NAMES[@]}"; do
 #SBATCH -A ${ACCOUNT}
 #SBATCH -p GPU-shared
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100-32:1
+#SBATCH --gres=gpu:h100-80:1
 #SBATCH --exclude=w009
 #SBATCH -t 12:00:00
 #SBATCH -o ${ROLLOUT_BASE}/logs/${RUN_NAME}-%j.out
