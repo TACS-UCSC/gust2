@@ -49,7 +49,7 @@ from analyze_rollout import (
 )
 from nsp_model import (
     NSPConfig, create_nsp_model, forward_teacher_forced,
-    build_teacher_forced_mask,
+    build_teacher_forced_mask, _local_cell_coords,
 )
 from tokenizer import (
     load_tokenized_data, load_checkpoint,
@@ -190,7 +190,8 @@ def make_predict_and_loss(config, scales_t0, padded_len_t0,
             pos_emb = jax.vmap(jax.vmap(exp_heads.pos_proj))(coords)
 
             h_flat = (h_up + pos_emb).reshape(n_tokens_k, config.n_embd)
-            logits = jax.vmap(exp_heads.heads[i])(h_flat)
+            local_coords = _local_cell_coords(h_k, w_k)
+            logits = exp_heads.expand(h_flat, i, local_coords)
             logits = jnp.where(scale_masks[scale_idx][None, :], logits, -1e9)
 
             # Greedy prediction
@@ -279,6 +280,7 @@ def main():
         n_embd=arch["n_embd"],
         dropout=0.0,
         rope_theta=arch.get("rope_theta", 16.0),
+        n_refine_layers=arch.get("n_refine_layers", 0),
     )
 
     key = jax.random.PRNGKey(args.seed)

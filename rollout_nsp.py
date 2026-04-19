@@ -100,6 +100,7 @@ def main():
         n_embd=arch["n_embd"],
         dropout=0.0,
         rope_theta=arch.get("rope_theta", 16.0),
+        n_refine_layers=arch.get("n_refine_layers", 0),
     )
 
     key = jax.random.PRNGKey(args.seed)

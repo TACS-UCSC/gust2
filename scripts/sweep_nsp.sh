@@ -25,7 +25,8 @@ ACCOUNT="mth260004p"
 # ---------- Shared model config ----------
 N_EMBD=1024
 N_HEAD=8
-ROPE_THETA=16.0
+# RoPE theta auto-resolves to finest grid side per sc config (16/24/32)
+N_REFINE_LAYERS=2
 
 # ---------- Shared training config ----------
 BATCH_SIZE=64
@@ -207,7 +208,7 @@ python train_nsp.py \\
     --n_layer ${N_LAYER} \\
     --n_head ${N_HEAD} \\
     --n_embd ${N_EMBD} \\
-    --rope_theta ${ROPE_THETA} \\
+    --n_refine_layers ${N_REFINE_LAYERS} \\
     --batch_size ${BATCH_SIZE} \\
     --epochs ${EPOCHS} \\
     --lr ${LR} \\
