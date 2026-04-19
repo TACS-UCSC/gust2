@@ -28,7 +28,7 @@ N_HEAD=8
 ROPE_THETA=16.0
 
 # ---------- Shared training config ----------
-BATCH_SIZE=128
+BATCH_SIZE=64
 EPOCHS=400
 LR=1e-4
 WEIGHT_DECAY=1e-4
@@ -48,13 +48,13 @@ VQVAE_NAMES=(
 set_nsp_size() {
     case "$1" in
         small)
-            N_LAYER=4; N_GPUS=4
+            N_LAYER=4; N_GPUS=2
             ;;
         medium)
-            N_LAYER=8; N_GPUS=4
+            N_LAYER=8; N_GPUS=2
             ;;
         large)
-            N_LAYER=16; N_GPUS=4
+            N_LAYER=16; N_GPUS=2
             ;;
         *)
             echo "Unknown NSP size: $1. Use small, medium, or large." >&2
@@ -80,8 +80,8 @@ while [[ $# -gt 0 ]]; do
         --list)
             echo "NSP sizes:"
             echo "  small:  4L,  n_embd=${N_EMBD}, 2 GPUs (~63M params)"
-            echo "  medium: 8L,  n_embd=${N_EMBD}, 4 GPUs (~115M params)"
-            echo "  large:  16L, n_embd=${N_EMBD}, 4 GPUs (~215M params)"
+            echo "  medium: 8L,  n_embd=${N_EMBD}, 2 GPUs (~115M params)"
+            echo "  large:  16L, n_embd=${N_EMBD}, 2 GPUs (~215M params)"
             echo ""
             echo "VQ-VAE token sources:"
             for v in "${VQVAE_NAMES[@]}"; do echo "  ${v}"; done
