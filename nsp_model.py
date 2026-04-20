@@ -589,7 +589,15 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
     for h, w in scales_t1:
         boundaries_t1.append(boundaries_t1[-1] + h * w)
 
+    # Initialize t1_tokens. Trainable-scale slots are zero and get
+    # overwritten by the loop; deterministic-scale slots (scales below
+    # trainable_indices[0]) need the actual codebook value, which is
+    # identical to t0's value at the same position (by definition of
+    # "deterministic": single valid code across the dataset).
+    first_trainable_pos = boundaries[trainable_indices[0]]
     t1_tokens = jnp.zeros(tokens_per_frame, dtype=jnp.int32)
+    t1_tokens = t1_tokens.at[:first_trainable_pos].set(
+        t0_tokens[:first_trainable_pos])
 
     if temperature == 0.0:
         scale_keys = [None] * len(trainable_indices)
