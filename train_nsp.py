@@ -19,6 +19,8 @@ import math
 import os
 
 import jax
+# Required for vmap+random under explicit-axis meshes in JAX >= 0.5.
+jax.config.update("jax_threefry_partitionable", False)
 import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 import optax
@@ -186,36 +188,25 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
                          ((0, 0), (0, padded_len_t1 - tokens_t1_trunc)))
         tokens_in = jnp.concatenate([t0_pad, t1_pad], axis=1)
 
-        # Context token dropout
-        if context_drop_rate > 0:
-            drop_keys = jax.random.split(key, B)
-            drop_masks = jax.vmap(
-                lambda k: jax.random.bernoulli(
-                    k, 1.0 - context_drop_rate, shape=(seq_len,))
-            )(drop_keys).astype(jnp.float32)
-        else:
-            drop_masks = None
+        # Forward pass via vmap. Dropout mask is derived per-sample
+        # inside the mapped function (via axis_index + fold_in) so the
+        # mapped inputs all share the same sharding spec.
+        def per_sample_forward(t):
+            if context_drop_rate > 0:
+                k = jax.random.fold_in(key, jax.lax.axis_index('batch'))
+                drop_mask = jax.random.bernoulli(
+                    k, 1.0 - context_drop_rate, shape=(seq_len,)
+                ).astype(jnp.float32)
+            else:
+                drop_mask = None
+            return forward_teacher_forced(
+                model, t, config,
+                scales_t0, padded_len_t0,
+                scales_t1, padded_len_t1,
+                attn_bias, drop_mask=drop_mask,
+            )
 
-        # Forward pass via vmap (codebook lookup happens per-sample
-        # inside the embedding to avoid sharding ambiguity)
-        if drop_masks is not None:
-            hidden = jax.vmap(
-                lambda t, m: forward_teacher_forced(
-                    model, t, config,
-                    scales_t0, padded_len_t0,
-                    scales_t1, padded_len_t1,
-                    attn_bias, drop_mask=m,
-                )
-            )(tokens_in, drop_masks)
-        else:
-            hidden = jax.vmap(
-                lambda t: forward_teacher_forced(
-                    model, t, config,
-                    scales_t0, padded_len_t0,
-                    scales_t1, padded_len_t1,
-                    attn_bias,
-                )
-            )(tokens_in)
+        hidden = jax.vmap(per_sample_forward, axis_name='batch')(tokens_in)
         # hidden: (B, L0+L1, n_embd)
 
         h_t0 = hidden[:, :padded_len_t0, :]

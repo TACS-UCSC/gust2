@@ -23,6 +23,7 @@ import os
 import time
 
 import jax
+jax.config.update("jax_threefry_partitionable", False)
 import jax.numpy as jnp
 import equinox as eqx
 import numpy as np
