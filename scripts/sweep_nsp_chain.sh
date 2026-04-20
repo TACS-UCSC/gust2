@@ -1,9 +1,9 @@
 #!/bin/bash
 # Launch chained NSP training jobs: 3 NSP sizes × 9 VQ-VAE configs.
 #
-# Each (NSP, VQ-VAE) combo gets a chain of short (4 hr) sbatch jobs,
+# Each (NSP, VQ-VAE) combo gets a chain of short (6 hr) sbatch jobs,
 # linked via --dependency=afterany. Trades a single 48 hr job (long
-# scheduler queue) for many 4 hr jobs (likely backfill-friendly), and
+# scheduler queue) for many 6 hr jobs (likely backfill-friendly), and
 # gives a real wall-clock measurement per combo from the time-to-finish.
 #
 # All jobs in a chain:
@@ -56,7 +56,7 @@ SAVE_EVERY=5
 WANDB_PROJECT="gust2-nsp-refine"
 
 # ---------- Chain settings ----------
-JOB_HOURS=4                   # walltime per job in the chain
+JOB_HOURS=6                   # walltime per job in the chain
 CHAIN_OVERRIDE=""             # set by --chain N to force a global value
 
 # ---------- VQ-VAE source configs ----------
@@ -80,9 +80,10 @@ set_nsp_size() {
 
 # ---------- Per-combo chain length ----------
 # Rough wall-clock-budget heuristic: scale jobs ≈ FLOPs/sample ratio.
-# At batch=16/refine=2 on L40S: small/sc341 ~3 hr/400 epoch; large/sc1941
-# ~250 hr. Numbers below cover the realistic worst case; finished jobs
-# no-op cheaply. Adjust as we learn actual times from the first runs.
+# At batch=16/refine=2 on H100: small/sc341 ~3 hr/400 epoch; large/sc1941
+# ~250 hr. Numbers below cover the realistic worst case at 4 hr/job;
+# extra jobs no-op cheaply once training_state.json says "done", so
+# 6 hr/job (current) just gives more headroom. Adjust if needed.
 chain_for_combo() {
     local nsp=$1; local vqvae=$2
     local sc="${vqvae##*-}"   # sc341 / sc917 / sc1941
@@ -166,7 +167,7 @@ fi
 
 echo "=========================================="
 echo "NSP Chain Sweep (refinement)"
-echo "  Per-job:    ${JOB_HOURS} hr, 1 L40S, batch=${BATCH_SIZE}, mem=32G"
+echo "  Per-job:    ${JOB_HOURS} hr, 1 H100, batch=${BATCH_SIZE}, mem=32G"
 echo "  Target:     ${EPOCHS} epochs, drop=${CONTEXT_DROP_RATE}"
 echo "  Chain:      ${CHAIN_OVERRIDE:-per-combo (see --list)}"
 echo "  Filters:    NSP=${NSP_SIZES[*]}, VQ-VAE=${#VQVAE_NAMES[@]} configs"
@@ -231,7 +232,7 @@ submit_chain_for_combo() {
 #SBATCH -A ${ACCOUNT}
 #SBATCH -p ${PARTITION}
 #SBATCH -N 1
-#SBATCH --gres=gpu:l40s-48:${N_GPUS}
+#SBATCH --gres=gpu:h100-80:${N_GPUS}
 #SBATCH --mem=32G
 #SBATCH -t ${JOB_HOURS}:00:00
 #SBATCH -o ${AR_BASE}/logs/${RUN_NAME}-${i}-%j.out
