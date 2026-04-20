@@ -231,7 +231,7 @@ submit_chain_for_combo() {
 #SBATCH -A ${ACCOUNT}
 #SBATCH -p ${PARTITION}
 #SBATCH -N 1
-#SBATCH --gres=gpu:l40s:${N_GPUS}
+#SBATCH --gres=gpu:l40s-48:${N_GPUS}
 #SBATCH --mem=32G
 #SBATCH -t ${JOB_HOURS}:00:00
 #SBATCH -o ${AR_BASE}/logs/${RUN_NAME}-${i}-%j.out
