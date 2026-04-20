@@ -83,6 +83,8 @@ def parse_args():
     parser.add_argument("--max_pairs", type=int, default=None,
                         help="Evaluate only first N pairs (default: all)")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--temperature", type=float, default=0.0,
+                        help="Sampling temperature; 0 = greedy argmax")
     # Wandb
     parser.add_argument("--wandb_project", type=str, default="gust2-eval")
     parser.add_argument("--wandb_name", type=str, default=None)
@@ -98,7 +100,8 @@ def parse_args():
 
 def make_predict_and_loss(config, scales_t0, padded_len_t0,
                           scales_t1, padded_len_t1,
-                          attn_bias, scale_masks, trainable_indices):
+                          attn_bias, scale_masks, trainable_indices,
+                          temperature=0.0):
     """Build JIT-compiled function that predicts t1 and computes cross-entropy.
 
     Returns: fn(model, exp_heads, t0_tokens, t1_tokens)
@@ -126,16 +129,17 @@ def make_predict_and_loss(config, scales_t0, padded_len_t0,
                      for idx, w in zip(trainable_indices, raw_weights)}
 
     @eqx.filter_jit
-    def predict_and_loss(model, exp_heads, t0_tokens, t1_tokens):
+    def predict_and_loss(model, exp_heads, t0_tokens, t1_tokens, key):
         """Single-sample prediction + cross-entropy.
 
         Args:
             model, exp_heads: NSP model (inference mode)
             t0_tokens: (tokens_per_frame,) compact indices
             t1_tokens: (tokens_per_frame,) GT compact indices
+            key: PRNG key (used only when temperature > 0)
 
         Returns:
-            predicted: (tokens_per_frame,) greedy predictions
+            predicted: (tokens_per_frame,) greedy or sampled predictions
             weighted_ce: scalar weighted cross-entropy
             per_scale_ce: (n_trainable,) raw CE per scale
         """
@@ -194,8 +198,13 @@ def make_predict_and_loss(config, scales_t0, padded_len_t0,
             logits = exp_heads.expand(h_flat, i, local_coords)
             logits = jnp.where(scale_masks[scale_idx][None, :], logits, -1e9)
 
-            # Greedy prediction
-            preds = jnp.argmax(logits, axis=-1)
+            # Predict: greedy if temperature == 0, else categorical sampling
+            if temperature == 0.0:
+                preds = jnp.argmax(logits, axis=-1)
+            else:
+                scale_key = jax.random.fold_in(key, scale_idx)
+                preds = jax.random.categorical(
+                    scale_key, logits / temperature, axis=-1)
             tgt_start = boundaries_full[scale_idx]
             tgt_end = boundaries_full[scale_idx + 1]
             predicted = predicted.at[tgt_start:tgt_end].set(preds)
@@ -325,13 +334,15 @@ def main():
         config, scales_t0, padded_len_t0,
         scales_t1, padded_len_t1,
         attn_bias, scale_masks, trainable_indices,
+        temperature=args.temperature,
     )
 
     # --- Evaluate all consecutive pairs ---
     n_pairs = len(indices) - 1
     if args.max_pairs is not None:
         n_pairs = min(n_pairs, args.max_pairs)
-    print(f"\nEvaluating {n_pairs} consecutive pairs...")
+    decode_desc = "greedy" if args.temperature == 0.0 else f"T={args.temperature}"
+    print(f"\nEvaluating {n_pairs} consecutive pairs ({decode_desc})...")
 
     all_ce = []
     all_per_scale_ce = []
@@ -341,12 +352,15 @@ def main():
     log_every = max(1, n_pairs // 20)
     t_start = time.time()
 
+    sample_keys = jax.random.split(
+        jax.random.PRNGKey(args.seed), n_pairs)
+
     for i in range(n_pairs):
         t0 = jnp.array(indices[i])
         t1 = jnp.array(indices[i + 1])
 
         predicted, ce, per_scale_ce = predict_and_loss(
-            model, exp_heads, t0, t1)
+            model, exp_heads, t0, t1, sample_keys[i])
 
         all_ce.append(float(ce))
         all_per_scale_ce.append(np.array(per_scale_ce))
@@ -415,6 +429,30 @@ def main():
         vqvae_pixel_rmse=per_sample_vqvae_rmse,      # (n_pairs,)
     )
     print(f"  Saved per-timestep metrics to {timestep_path}")
+
+    # --- Save predicted/GT tokens in rollout-compatible format ---
+    # Lets generate_snapshots.py reuse the rollout snapshot tool on
+    # single-step outputs. The format mirrors rollout_nsp.py: index 0 is
+    # the seed (val frame 0), indices 1..n_pairs are model predictions of
+    # the corresponding GT frames.
+    rollout_indices = np.concatenate(
+        [indices[0:1], pred_tokens_arr], axis=0)
+    gt_indices_full = np.concatenate(
+        [indices[0:1], gt_tokens_arr], axis=0)
+    tokens_path = os.path.join(args.output_dir, "rollout_tokens.npz")
+    np.savez_compressed(tokens_path,
+        rollout_indices=rollout_indices,
+        gt_indices=gt_indices_full,
+        scales=np.array(scales_int),
+        start_frame=0,
+        n_steps=n_pairs,
+        codebook=np.array(token_data["codebook"]),
+        effective_vocab_size=token_data["effective_vocab_size"],
+        codebook_dim=token_data["codebook_dim"],
+        new_to_old=np.array(new_to_old),
+        scale_masks=np.array(token_data["scale_masks"]),
+    )
+    print(f"  Saved tokens (rollout format) to {tokens_path}")
 
     # --- Spectral analysis (single-step predictions) ---
     print("\nComputing spectra...")

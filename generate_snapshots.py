@@ -121,7 +121,7 @@ def plot_snapshot(gt_field, vqvae_field, nsp_field, timestep):
     """Plot GT / VQ-VAE / NSP side-by-side for a single timestep."""
     vmin = gt_field.min()
     vmax = gt_field.max()
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=True)
 
     for ax, field, label in [
         (axes[0], gt_field, "Ground Truth"),
@@ -134,7 +134,6 @@ def plot_snapshot(gt_field, vqvae_field, nsp_field, timestep):
         ax.axis("off")
 
     fig.colorbar(im, ax=axes, shrink=0.8, label="Vorticity")
-    fig.tight_layout()
     return fig
 
 
