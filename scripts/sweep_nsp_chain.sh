@@ -80,7 +80,7 @@ set_nsp_size() {
 
 # ---------- Per-combo chain length ----------
 # Rough wall-clock-budget heuristic: scale jobs ≈ FLOPs/sample ratio.
-# At batch=16/refine=2 on H100: small/sc341 ~3 hr/400 epoch; large/sc1941
+# At batch=16/refine=2 on L40S: small/sc341 ~3 hr/400 epoch; large/sc1941
 # ~250 hr. Numbers below cover the realistic worst case; finished jobs
 # no-op cheaply. Adjust as we learn actual times from the first runs.
 chain_for_combo() {
@@ -166,7 +166,7 @@ fi
 
 echo "=========================================="
 echo "NSP Chain Sweep (refinement)"
-echo "  Per-job:    ${JOB_HOURS} hr, 1 H100, batch=${BATCH_SIZE}"
+echo "  Per-job:    ${JOB_HOURS} hr, 1 L40S, batch=${BATCH_SIZE}, mem=64G"
 echo "  Target:     ${EPOCHS} epochs, drop=${CONTEXT_DROP_RATE}"
 echo "  Chain:      ${CHAIN_OVERRIDE:-per-combo (see --list)}"
 echo "  Filters:    NSP=${NSP_SIZES[*]}, VQ-VAE=${#VQVAE_NAMES[@]} configs"
@@ -231,7 +231,8 @@ submit_chain_for_combo() {
 #SBATCH -A ${ACCOUNT}
 #SBATCH -p ${PARTITION}
 #SBATCH -N 1
-#SBATCH --gres=gpu:h100-80:${N_GPUS}
+#SBATCH --gres=gpu:l40s:${N_GPUS}
+#SBATCH --mem=64G
 #SBATCH -t ${JOB_HOURS}:00:00
 #SBATCH -o ${AR_BASE}/logs/${RUN_NAME}-${i}-%j.out
 #SBATCH -e ${AR_BASE}/logs/${RUN_NAME}-${i}-%j.err
