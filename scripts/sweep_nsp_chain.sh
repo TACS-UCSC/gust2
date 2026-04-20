@@ -90,10 +90,10 @@ chain_for_combo() {
         small-sc341)   echo 1 ;;
         small-sc917)   echo 3 ;;
         small-sc1941)  echo 8 ;;
-        medium-sc341)  echo 2 ;;
+        medium-sc341)  echo 1 ;;
         medium-sc917)  echo 6 ;;
         medium-sc1941) echo 16 ;;
-        large-sc341)   echo 4 ;;
+        large-sc341)   echo 1 ;;
         large-sc917)   echo 12 ;;
         large-sc1941)  echo 32 ;;
         *) echo 4 ;;
@@ -166,7 +166,7 @@ fi
 
 echo "=========================================="
 echo "NSP Chain Sweep (refinement)"
-echo "  Per-job:    ${JOB_HOURS} hr, 1 L40S, batch=${BATCH_SIZE}, mem=64G"
+echo "  Per-job:    ${JOB_HOURS} hr, 1 L40S, batch=${BATCH_SIZE}, mem=32G"
 echo "  Target:     ${EPOCHS} epochs, drop=${CONTEXT_DROP_RATE}"
 echo "  Chain:      ${CHAIN_OVERRIDE:-per-combo (see --list)}"
 echo "  Filters:    NSP=${NSP_SIZES[*]}, VQ-VAE=${#VQVAE_NAMES[@]} configs"
@@ -232,7 +232,7 @@ submit_chain_for_combo() {
 #SBATCH -p ${PARTITION}
 #SBATCH -N 1
 #SBATCH --gres=gpu:l40s:${N_GPUS}
-#SBATCH --mem=64G
+#SBATCH --mem=32G
 #SBATCH -t ${JOB_HOURS}:00:00
 #SBATCH -o ${AR_BASE}/logs/${RUN_NAME}-${i}-%j.out
 #SBATCH -e ${AR_BASE}/logs/${RUN_NAME}-${i}-%j.err
