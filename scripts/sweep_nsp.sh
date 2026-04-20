@@ -18,7 +18,11 @@ set -euo pipefail
 OCEAN="/ocean/projects/mth260004p/sambamur"
 REPODIR="${OCEAN}/gust"
 TOKENS_BASE="${OCEAN}/experiments/tokens"
-AR_BASE="${OCEAN}/experiments/ar"
+# Fresh checkpoint dir for the refinement sweep so we don't collide
+# with the original nsp-branch runs (whose arch_config lacks
+# n_refine_layers / auto RoPE theta and would trigger an architecture
+# mismatch error on --resume).
+AR_BASE="${OCEAN}/experiments/ar-refine"
 WANDB_BASE="${OCEAN}/wandb"
 ACCOUNT="mth260004p"
 
@@ -29,13 +33,18 @@ N_HEAD=8
 N_REFINE_LAYERS=2
 
 # ---------- Shared training config ----------
-BATCH_SIZE=64
+# Single H100 per job, batch 16 (matches the local-verified recipe with
+# the within-scale refinement + bug fix from nsp-refinement). Heavy jobs
+# (large × sc1941, etc.) may not finish 400 epochs in the 2-day Slurm
+# limit; rerun with --resume to continue.
+BATCH_SIZE=16
 EPOCHS=400
 LR=1e-4
 WEIGHT_DECAY=1e-4
 GRAD_CLIP=1.0
+CONTEXT_DROP_RATE=0.25
 SEED=42
-WANDB_PROJECT="gust2-nsp"
+WANDB_PROJECT="gust2-nsp-refine"
 
 # ---------- VQ-VAE source configs ----------
 VQVAE_NAMES=(
@@ -47,27 +56,20 @@ VQVAE_NAMES=(
 # ---------- NSP model sizes ----------
 # (name, n_layer, n_gpus)
 set_nsp_size() {
+    # Single H100 per job for all NSP sizes. Only n_layer scales; n_embd
+    # and n_refine_layers stay shared so ExpansionHeads parameter count is
+    # identical across small/medium/large within each VQ-VAE config.
     case "$1" in
-        small)
-            N_LAYER=4; N_GPUS=2
-            ;;
-        medium)
-            N_LAYER=8; N_GPUS=2
-            ;;
-        large)
-            N_LAYER=16; N_GPUS=2
-            ;;
+        small)  N_LAYER=4 ;;
+        medium) N_LAYER=8 ;;
+        large)  N_LAYER=16 ;;
         *)
             echo "Unknown NSP size: $1. Use small, medium, or large." >&2
             exit 1
             ;;
     esac
-
-    if [ "${N_GPUS}" -le 4 ]; then
-        PARTITION="GPU-shared"
-    else
-        PARTITION="GPU"
-    fi
+    N_GPUS=1
+    PARTITION="GPU-shared"
 }
 
 # ---------- Parse args ----------
@@ -79,15 +81,16 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) DRY_RUN=true; shift ;;
         --list)
-            echo "NSP sizes:"
-            echo "  small:  4L,  n_embd=${N_EMBD}, 2 GPUs (~63M params)"
-            echo "  medium: 8L,  n_embd=${N_EMBD}, 2 GPUs (~115M params)"
-            echo "  large:  16L, n_embd=${N_EMBD}, 2 GPUs (~215M params)"
+            echo "NSP sizes (1 H100 each, batch=${BATCH_SIZE}):"
+            echo "  small:  4L,  n_embd=${N_EMBD}, refine=${N_REFINE_LAYERS}"
+            echo "  medium: 8L,  n_embd=${N_EMBD}, refine=${N_REFINE_LAYERS}"
+            echo "  large:  16L, n_embd=${N_EMBD}, refine=${N_REFINE_LAYERS}"
+            echo "  (ExpansionHeads identical across sizes within a VQ-VAE config)"
             echo ""
             echo "VQ-VAE token sources:"
             for v in "${VQVAE_NAMES[@]}"; do echo "  ${v}"; done
             echo ""
-            echo "Total: 3 × 9 = 27 jobs"
+            echo "Total: 3 × 9 = 27 jobs, ${EPOCHS} epochs, drop=${CONTEXT_DROP_RATE}"
             exit 0
             ;;
         --help|-h)
@@ -179,7 +182,6 @@ for VQVAE_NAME in "${VQVAE_NAMES[@]}"; do
 #SBATCH -N 1
 #SBATCH --gres=gpu:h100-80:${N_GPUS}
 #SBATCH -t 2-00:00:00
-#SBATCH --exclude=w009
 #SBATCH -o ${AR_BASE}/logs/${RUN_NAME}-%j.out
 #SBATCH -e ${AR_BASE}/logs/${RUN_NAME}-%j.err
 
@@ -219,7 +221,7 @@ python train_nsp.py \\
     --wandb_project ${WANDB_PROJECT} \\
     --wandb_name ${RUN_NAME} \\
     --wandb_group ${WANDB_GROUP} \\
-    --context_drop_rate 0.1 \\
+    --context_drop_rate ${CONTEXT_DROP_RATE} \\
     --wandb_dir "${WANDB_BASE}" \\
     ${WANDB_ID_FLAG} \\
     ${RESUME_FLAG}
