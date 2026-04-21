@@ -156,13 +156,13 @@ export TMPDIR="\${SCRATCH}/\${USER}/tmpdir"
 mkdir -p "\${TMPDIR}"
 
 module purge
-module load ncarenv/23.09
+module load ncarenv
 
 source "${VENV}/bin/activate"
 
 # JAX is installed with its own cuda13/cudnn via pip (driver is CUDA 13).
 NVIDIA_LIBS=\$(python -c "import nvidia; print(nvidia.__path__[0])")
-export LD_LIBRARY_PATH=\$(find \$NVIDIA_LIBS -name "lib" -type d | tr '\\n' ':'):\$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=\$(find \$NVIDIA_LIBS -name "lib" -type d | tr '\\n' ':'):\${LD_LIBRARY_PATH:-}
 
 echo "=========================================="
 echo "Job:       \${PBS_JOBID}"
