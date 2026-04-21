@@ -44,7 +44,8 @@ class NSPConfig:
     n_head: int = 8
     n_embd: int = 256
     dropout: float = 0.0
-    rope_theta: float = 16.0
+    rope_theta: float | None = None          # auto: max grid side across scales
+    n_refine_layers: int = 2                 # within-scale refinement blocks
 
     @property
     def n_scales(self) -> int:
@@ -420,19 +421,24 @@ class NSPModel(eqx.Module):
 
 
 class ExpansionHeads(eqx.Module):
-    """Per-scale prediction heads with shared position encoding.
+    """Per-scale prediction heads with shared refinement + position encoding.
 
     Each head maps n_embd → effective_vocab. Scale masks are applied
     externally in the loss function to zero out invalid token logits.
 
     pos_proj maps 2D normalized coordinates → n_embd, added to upsampled
     hidden states to distinguish target positions sharing the same source.
+
+    refinement is a shared stack of NSPBlocks run over the K×K target-scale
+    hidden states with local (cell-center) RoPE coords. It lets fine-scale
+    token choices coordinate across neighbors before the per-scale logit head.
     """
     heads: list
     pos_proj: eqx.nn.Linear
+    refinement: list
 
     def __init__(self, config: NSPConfig, *, key: jax.Array):
-        k1, k2 = jax.random.split(key)
+        k1, k2, k3 = jax.random.split(key, 3)
         head_keys = jax.random.split(k1, len(config.trainable_scale_indices))
 
         self.heads = [
@@ -442,10 +448,47 @@ class ExpansionHeads(eqx.Module):
         ]
         self.pos_proj = eqx.nn.Linear(2, config.n_embd, use_bias=True, key=k2)
 
+        n_refine = max(int(config.n_refine_layers), 0)
+        if n_refine > 0:
+            ref_keys = jax.random.split(k3, n_refine)
+            self.refinement = [NSPBlock(config, key=k) for k in ref_keys]
+        else:
+            self.refinement = []
+
+    def expand(self, h: jax.Array, head_idx: int,
+               local_coords: jax.Array) -> jax.Array:
+        """Refinement → per-scale logit head.
+
+        Args:
+            h: (K*K, n_embd) positioned hidden states for one sample
+            head_idx: index into self.heads (position in trainable_indices)
+            local_coords: (K*K, 2) cell-center coords on the K×K target grid
+
+        Returns:
+            (K*K, effective_vocab) logits
+        """
+        if len(self.refinement) > 0:
+            n = h.shape[0]
+            attn_bias = jnp.zeros((n, n), dtype=jnp.float32)
+            for blk in self.refinement:
+                h = blk(h, attn_bias, local_coords)
+        return jax.vmap(self.heads[head_idx])(h)
+
     def get_num_params(self) -> int:
         return sum(
             x.size for x in jax.tree_util.tree_leaves(eqx.filter(self, eqx.is_array))
         )
+
+
+def _local_cell_coords(h_k: int, w_k: int) -> jnp.ndarray:
+    """Cell-center coords for a K×K grid: 0.5, 1.5, ..., K-0.5.
+
+    Returns: (h_k * w_k, 2) float32, row-major.
+    """
+    rows = jnp.arange(h_k, dtype=jnp.float32) + 0.5
+    cols = jnp.arange(w_k, dtype=jnp.float32) + 0.5
+    grid_r, grid_c = jnp.meshgrid(rows, cols, indexing='ij')
+    return jnp.stack([grid_r, grid_c], axis=-1).reshape(h_k * w_k, 2)
 
 
 # =============================================================================
@@ -546,7 +589,15 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
     for h, w in scales_t1:
         boundaries_t1.append(boundaries_t1[-1] + h * w)
 
+    # Initialize t1_tokens. Trainable-scale slots are zero and get
+    # overwritten by the loop; deterministic-scale slots (scales below
+    # trainable_indices[0]) need the actual codebook value, which is
+    # identical to t0's value at the same position (by definition of
+    # "deterministic": single valid code across the dataset).
+    first_trainable_pos = boundaries[trainable_indices[0]]
     t1_tokens = jnp.zeros(tokens_per_frame, dtype=jnp.int32)
+    t1_tokens = t1_tokens.at[:first_trainable_pos].set(
+        t0_tokens[:first_trainable_pos])
 
     if temperature == 0.0:
         scale_keys = [None] * len(trainable_indices)
@@ -597,9 +648,10 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
         coords = jnp.stack([grid_r, grid_c], axis=-1)
         pos_emb = jax.vmap(jax.vmap(exp_heads.pos_proj))(coords)
 
-        # Expansion head → masked logits → argmax or sample
+        # Expansion (refinement + head) → masked logits → argmax or sample
         h_flat = (h_up + pos_emb).reshape(n_tokens_k, config.n_embd)
-        logits = jax.vmap(exp_heads.heads[i])(h_flat)
+        local_coords = _local_cell_coords(h_k, w_k)
+        logits = exp_heads.expand(h_flat, i, local_coords)
         logits = jnp.where(scale_masks[scale_idx][None, :], logits, -1e9)
         if temperature == 0.0:
             predicted = jnp.argmax(logits, axis=-1)
@@ -643,6 +695,9 @@ def create_nsp_model(token_data: dict, config: NSPConfig, key: jax.Array
     config.tokens_per_frame = sum(s * s for s in scales_int)
     config.first_trainable_scale = int(token_data.get("first_trainable_scale", 0))
 
+    if config.rope_theta is None:
+        config.rope_theta = float(max(max(h, w) for h, w in config.scales))
+
     k1, k2 = jax.random.split(key)
     model = NSPModel(config, codebook, key=k1)
     exp_heads = ExpansionHeads(config, key=k2)
@@ -654,5 +709,7 @@ def create_nsp_model(token_data: dict, config: NSPConfig, key: jax.Array
           f"padded: {config.padded_seq_len}")
     print(f"Effective vocab: {config.effective_vocab_size}")
     print(f"First trainable scale: {config.first_trainable_scale}")
+    print(f"RoPE theta: {config.rope_theta}, "
+          f"refine layers: {config.n_refine_layers}")
 
     return model, exp_heads

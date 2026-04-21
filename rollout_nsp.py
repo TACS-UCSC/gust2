@@ -23,6 +23,7 @@ import os
 import time
 
 import jax
+jax.config.update("jax_threefry_partitionable", False)
 import jax.numpy as jnp
 import equinox as eqx
 import numpy as np
@@ -99,7 +100,8 @@ def main():
         n_head=arch["n_head"],
         n_embd=arch["n_embd"],
         dropout=0.0,
-        rope_theta=arch.get("rope_theta", 16.0),
+        rope_theta=arch["rope_theta"],
+        n_refine_layers=arch["n_refine_layers"],
     )
 
     key = jax.random.PRNGKey(args.seed)

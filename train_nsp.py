@@ -15,9 +15,12 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 
 import jax
+# Required for vmap+random under explicit-axis meshes in JAX >= 0.5.
+jax.config.update("jax_threefry_partitionable", False)
 import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 import optax
@@ -35,6 +38,7 @@ from nsp_model import (
     NSPConfig, NSPModel, ExpansionHeads,
     create_nsp_model, forward_teacher_forced,
     build_teacher_forced_mask, build_rope_coords,
+    _local_cell_coords,
 )
 from tokenizer import load_tokenized_data
 
@@ -54,7 +58,10 @@ def parse_args():
     parser.add_argument("--n_head", type=int, default=8)
     parser.add_argument("--n_embd", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.0)
-    parser.add_argument("--rope_theta", type=float, default=16.0)
+    parser.add_argument("--rope_theta", type=float, default=None,
+                        help="RoPE base (default: auto = finest grid side)")
+    parser.add_argument("--n_refine_layers", type=int, default=2,
+                        help="Within-scale refinement blocks in ExpansionHeads")
     # Training
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=100)
@@ -181,36 +188,25 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
                          ((0, 0), (0, padded_len_t1 - tokens_t1_trunc)))
         tokens_in = jnp.concatenate([t0_pad, t1_pad], axis=1)
 
-        # Context token dropout
-        if context_drop_rate > 0:
-            drop_keys = jax.random.split(key, B)
-            drop_masks = jax.vmap(
-                lambda k: jax.random.bernoulli(
-                    k, 1.0 - context_drop_rate, shape=(seq_len,))
-            )(drop_keys).astype(jnp.float32)
-        else:
-            drop_masks = None
+        # Forward pass via vmap. Dropout mask is derived per-sample
+        # inside the mapped function (via axis_index + fold_in) so the
+        # mapped inputs all share the same sharding spec.
+        def per_sample_forward(t):
+            if context_drop_rate > 0:
+                k = jax.random.fold_in(key, jax.lax.axis_index('batch'))
+                drop_mask = jax.random.bernoulli(
+                    k, 1.0 - context_drop_rate, shape=(seq_len,)
+                ).astype(jnp.float32)
+            else:
+                drop_mask = None
+            return forward_teacher_forced(
+                model, t, config,
+                scales_t0, padded_len_t0,
+                scales_t1, padded_len_t1,
+                attn_bias, drop_mask=drop_mask,
+            )
 
-        # Forward pass via vmap (codebook lookup happens per-sample
-        # inside the embedding to avoid sharding ambiguity)
-        if drop_masks is not None:
-            hidden = jax.vmap(
-                lambda t, m: forward_teacher_forced(
-                    model, t, config,
-                    scales_t0, padded_len_t0,
-                    scales_t1, padded_len_t1,
-                    attn_bias, drop_mask=m,
-                )
-            )(tokens_in, drop_masks)
-        else:
-            hidden = jax.vmap(
-                lambda t: forward_teacher_forced(
-                    model, t, config,
-                    scales_t0, padded_len_t0,
-                    scales_t1, padded_len_t1,
-                    attn_bias,
-                )
-            )(tokens_in)
+        hidden = jax.vmap(per_sample_forward, axis_name='batch')(tokens_in)
         # hidden: (B, L0+L1, n_embd)
 
         h_t0 = hidden[:, :padded_len_t0, :]
@@ -256,9 +252,12 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
             pos_emb = jax.vmap(jax.vmap(exp_heads.pos_proj))(coords)
             h_positioned = h_upsampled + pos_emb[None]  # (B, h_k, w_k, n_embd)
 
-            # Apply expansion head → logits
+            # Apply expansion (refinement + head) → logits
             h_flat = h_positioned.reshape(B, n_tokens_k, config.n_embd)
-            logits = jax.vmap(jax.vmap(exp_heads.heads[i]))(h_flat)
+            local_coords = _local_cell_coords(h_k, w_k)
+            logits = jax.vmap(
+                lambda hh, idx=i, lc=local_coords: exp_heads.expand(hh, idx, lc)
+            )(h_flat)
             # (B, n_tokens_k, effective_vocab)
 
             # Apply scale mask: set invalid tokens to -1e9
@@ -405,6 +404,7 @@ def main():
         n_embd=args.n_embd,
         dropout=args.dropout,
         rope_theta=args.rope_theta,
+        n_refine_layers=args.n_refine_layers,
     )
 
     # Create model
@@ -425,6 +425,7 @@ def main():
         "codebook_dim": config.codebook_dim,
         "first_trainable_scale": config.first_trainable_scale,
         "rope_theta": config.rope_theta,
+        "n_refine_layers": config.n_refine_layers,
     }
 
     # Compute sequence lengths
@@ -447,10 +448,12 @@ def main():
         scales_t0, padded_len_t0, scales_t1, padded_len_t1)
     print(f"Attention mask: {attn_bias.shape}")
 
-    # Per-scale loss weights: 1/sqrt(token_count), normalized
+    # Per-scale loss weights: 1/log(token_count + 1), normalized.
+    # Log decays much slower than 1/sqrt(N)=1/K, giving fine scales
+    # (where the grid-artifact failure mode lives) more gradient signal.
     token_counts = [config.scales[i][0] * config.scales[i][1]
                     for i in trainable_indices]
-    raw_weights = [1.0 / c ** 0.5 for c in token_counts]
+    raw_weights = [1.0 / math.log(c + 1.0) for c in token_counts]
     mean_w = sum(raw_weights) / len(raw_weights)
     scale_weights = {idx: w / mean_w
                      for idx, w in zip(trainable_indices, raw_weights)}
