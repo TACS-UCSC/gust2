@@ -191,6 +191,13 @@ source "${VENV}/bin/activate"
 NVIDIA_LIBS=\$(python -c "import nvidia; print(nvidia.__path__[0])")
 export LD_LIBRARY_PATH=\$(find \$NVIDIA_LIBS -name "lib" -type d | tr '\\n' ':'):\${LD_LIBRARY_PATH:-}
 
+# Disable XLA's Triton GEMM backend on A100. eval_single_step.py runs the
+# VQ-VAE decoder (transposed convs + codebook one-hot matmul), which
+# triggers a Triton MLIR layout bug on this JAX/A100 combo:
+#   LLVM ERROR: Dimensions must match, ignoring order, but they don't.
+#     Got dims: ["register", "lane", "warp"] and ["lane", "warp"]
+export XLA_FLAGS="\${XLA_FLAGS:-} --xla_gpu_enable_triton_gemm=false"
+
 echo "=========================================="
 echo "Job:       \${PBS_JOBID}"
 echo "Node:      \$(hostname)"
