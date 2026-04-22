@@ -453,6 +453,24 @@ def main():
     hist_fig = plot_histogram(
         hist_data, os.path.join(args.output_dir, "pixel_histogram.png"))
 
+    # --- Snapshot PNGs ---
+    snapshot_times = [1, 2, 5, 10, 50, 100, 250, 500, 1000, 1500, 2000]
+    snapshot_dir = os.path.join(args.output_dir, "snapshots")
+    os.makedirs(snapshot_dir, exist_ok=True)
+    snapshot_figs = {}
+    for t in snapshot_times:
+        if t >= n_frames:
+            continue
+        fig = plot_snapshot(
+            raw_gt[t, 0], vqvae_fields[t, 0], nsp_fields[t, 0], t)
+        out = os.path.join(snapshot_dir, f"t{t:04d}.png")
+        # Rely on constrained_layout (set inside plot_snapshot) — do NOT pass
+        # bbox_inches='tight', or the shared colorbar gets squished onto the
+        # rightmost axis.
+        fig.savefig(out, dpi=150)
+        snapshot_figs[t] = fig
+        print(f"  Saved snapshot t={t} to {out}")
+
     # --- Save metrics ---
     metrics_path = os.path.join(args.output_dir, "metrics.json")
     with open(metrics_path, "w") as f:
@@ -489,12 +507,8 @@ def main():
             "pixel_histogram": wandb.Image(hist_fig),
         }
 
-        for t in [100, 500, 1000]:
-            if t < n_frames:
-                snap_fig = plot_snapshot(
-                    raw_gt[t, 0], vqvae_fields[t, 0], nsp_fields[t, 0], t)
-                log_dict[f"snapshot/t{t}"] = wandb.Image(snap_fig)
-                plt.close(snap_fig)
+        for t, snap_fig in snapshot_figs.items():
+            log_dict[f"snapshot/t{t}"] = wandb.Image(snap_fig)
 
         wandb.log(log_dict)
         wandb.finish()

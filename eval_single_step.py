@@ -523,8 +523,26 @@ def main():
         os.path.join(args.output_dir, "enstrophy_spectrum.png"))
     hist_fig = plot_histogram(
         hist_data, os.path.join(args.output_dir, "pixel_histogram.png"))
-    snap_fig = plot_snapshot(
-        raw_gt_pairs[0, 0], gt_decoded[0, 0], pred_fields[0, 0], timestep=1)
+
+    # --- Sample snapshot PNGs (single-step predictions at a few timesteps) ---
+    snapshot_candidates = [1, 100, 500, 1000, 1999]
+    snapshot_times = sorted({
+        t for t in snapshot_candidates if 0 < t <= n_pairs
+    })
+    snapshot_dir = os.path.join(args.output_dir, "snapshots")
+    os.makedirs(snapshot_dir, exist_ok=True)
+    snapshot_figs = {}
+    for t in snapshot_times:
+        # Index t -> frame pair (i = t - 1) so t=1 is the first predicted frame.
+        i = t - 1
+        fig = plot_snapshot(
+            raw_gt_pairs[i, 0], gt_decoded[i, 0], pred_fields[i, 0], timestep=t)
+        out = os.path.join(snapshot_dir, f"t{t:04d}.png")
+        # constrained_layout is set inside plot_snapshot; don't pass
+        # bbox_inches='tight' or the shared colorbar gets squished.
+        fig.savefig(out, dpi=150)
+        snapshot_figs[t] = fig
+        print(f"  Saved snapshot t={t} to {out}")
 
     # --- Save results ---
     results = {
@@ -586,8 +604,9 @@ def main():
             "tke_spectrum": wandb.Image(tke_fig),
             "enstrophy_spectrum": wandb.Image(ens_fig),
             "pixel_histogram": wandb.Image(hist_fig),
-            "snapshot/first_pushforward": wandb.Image(snap_fig),
         }
+        for t, fig in snapshot_figs.items():
+            log_dict[f"snapshot/t{t}"] = wandb.Image(fig)
         for j, idx in enumerate(trainable_indices):
             h, w = config.scales[idx]
             log_dict[f"ce/scale_{h}x{w}"] = float(per_scale_means[j])
