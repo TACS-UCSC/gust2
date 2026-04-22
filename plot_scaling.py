@@ -21,12 +21,20 @@ import wandb
 # ── Constants ────────────────────────────────────────────────────────────────
 
 ENTITY = "bigpseud-ucsc"
-ANALYSIS_PROJECT = "gust2-analysis"
-EVAL_PROJECT = "gust2-eval"
+ANALYSIS_PROJECT = "gust2-analysis-derecho"
+SAMPLING_PROJECT = "gust2-sampling-derecho"
+EVAL_PROJECT = "gust2-eval-derecho"
 
 VQVAE_PARAMS = {"small": 31e6, "medium": 57e6, "large": 109e6}
 NSP_PARAMS = {"small": 63e6, "medium": 115e6, "large": 215e6}
 TOKENS_PER_SAMPLE = {"sc341": 341, "sc917": 917, "sc1941": 1941}
+
+# Trainable scales per sc config (1x1 is free context; we predict from 2x2 up).
+SC_TRAINABLE_SCALES = {
+    "sc341":  [2, 4, 8, 16],
+    "sc917":  [2, 4, 8, 16, 24],
+    "sc1941": [2, 4, 8, 16, 24, 32],
+}
 
 # ── Colorblind-safe palette (Wong 2011) ──────────────────────────────────────
 # Safe for deuteranopia, protanopia, and tritanopia.
@@ -54,12 +62,31 @@ SC_ORDERED = ["sc341", "sc917", "sc1941"]
 
 # Row 0 = single-step metrics together, then rollout metrics, EMD last
 METRICS = [
-    ("cross_entropy",      "Cross-Entropy (nats)"),
+    ("ce_per_token",       "Cross-Entropy per Token (nats)"),
     ("pixel_rmse",         "Pixel RMSE"),
     ("tke_rse_nsp",        "TKE Relative Spectral Error"),
     ("enstrophy_rse_nsp",  "Enstrophy RSE"),
     ("emd_nsp",            "Pixel EMD"),
 ]
+
+
+def compute_ce_per_token(summary, sc_config):
+    """Aggregate per-scale CEs into a per-token mean.
+
+    Each scale logs its raw mean CE at ce/scale_HxW. Weight by token count
+    (H*W) and divide by total trainable tokens to get a fair per-token nat cost.
+    Returns None if any trainable scale is missing.
+    """
+    scales = SC_TRAINABLE_SCALES[sc_config]
+    total_nats = 0.0
+    total_tokens = 0
+    for s in scales:
+        ce = summary.get(f"ce/scale_{s}x{s}")
+        if ce is None:
+            return None
+        total_nats += s * s * ce
+        total_tokens += s * s
+    return total_nats / total_tokens
 
 
 def parse_run_name(name):
@@ -70,13 +97,25 @@ def parse_run_name(name):
 # ── Data fetching ────────────────────────────────────────────────────────────
 
 
+def _latest_per_name(project):
+    """Return newest run per name (dedupes retrained runs)."""
+    api = wandb.Api()
+    runs = list(api.runs(f"{ENTITY}/{project}"))
+    runs.sort(key=lambda r: r.created_at, reverse=True)
+    seen = {}
+    for r in runs:
+        if r.name not in seen:
+            seen[r.name] = r
+    return seen
+
+
 def fetch_rollout_metrics():
     """Fetch rollout spectral metrics from gust2-analysis + CE/RMSE from gust2-eval."""
-    api = wandb.Api()
+    analysis_runs = _latest_per_name(ANALYSIS_PROJECT)
+    eval_runs = _latest_per_name(EVAL_PROJECT)
 
     analysis = {}
-    for r in api.runs(f"{ENTITY}/{ANALYSIS_PROJECT}"):
-        name = r.name
+    for name, r in analysis_runs.items():
         if not any(sz in name for sz in ["small", "medium", "large"]):
             continue
         s = r.summary
@@ -87,13 +126,17 @@ def fetch_rollout_metrics():
         }
 
     eval_data = {}
-    for r in api.runs(f"{ENTITY}/{EVAL_PROJECT}"):
-        name = r.name
+    for name, r in eval_runs.items():
         if not any(sz in name for sz in ["small", "medium", "large"]):
+            continue
+        try:
+            _, sc_config, _ = parse_run_name(name)
+        except (IndexError, ValueError):
             continue
         s = r.summary
         eval_data[name] = {
             "cross_entropy": s.get("cross_entropy"),
+            "ce_per_token": compute_ce_per_token(s, sc_config),
             "pixel_rmse": s.get("pixel_rmse"),
         }
 
@@ -119,13 +162,91 @@ def fetch_rollout_metrics():
     return rows
 
 
+def fetch_sampling_rollout_metrics(temperature=None):
+    """Pull rollouts from gust2-sampling (temperature sweep).
+
+    If ``temperature`` is None, reduces across T per (vqvae, sc, nsp) group by
+    taking the min per metric independently (the Pareto lower bound from T
+    tuning). If a specific ``temperature`` is given, returns only runs at
+    that T, no reduction.
+
+    Run names follow ``<vqvae>-<sc>-nsp-<nsp>-T<temp>-s<seed>``.
+    CE/RMSE come from gust2-eval (deterministic, no T).
+    """
+    sampling_runs = _latest_per_name(SAMPLING_PROJECT)
+    eval_runs = _latest_per_name(EVAL_PROJECT)
+
+    # Group sampling runs by (vqvae_size, sc_config, nsp_size) across T.
+    groups = {}
+    for name, r in sampling_runs.items():
+        parts = name.split("-")
+        if len(parts) < 6:
+            continue
+        vqvae_size, sc_config, _, nsp_size, temp_tag, _ = parts[:6]
+        try:
+            temp = float(temp_tag.lstrip("T"))
+        except ValueError:
+            continue
+        if temperature is not None and abs(temp - temperature) > 1e-6:
+            continue
+        s = r.summary
+        metrics = {
+            "tke_rse_nsp":       s.get("tke_rse/nsp"),
+            "enstrophy_rse_nsp": s.get("enstrophy_rse/nsp"),
+            "emd_nsp":           s.get("emd/nsp"),
+        }
+        key = (vqvae_size, sc_config, nsp_size)
+        groups.setdefault(key, []).append((temp, metrics))
+
+    rollout_rows = []
+    for (vqvae_size, sc_config, nsp_size), entries in groups.items():
+        best = {}
+        best_t = {}
+        for m in ("tke_rse_nsp", "enstrophy_rse_nsp", "emd_nsp"):
+            vals = [(t, e[m]) for t, e in entries if e[m] is not None]
+            if not vals:
+                continue
+            t, v = min(vals, key=lambda tv: tv[1])
+            best[m] = v
+            best_t[m] = t
+
+        name = f"{vqvae_size}-{sc_config}-nsp-{nsp_size}"
+        if temperature is not None:
+            name = f"{name}-T{temperature}"
+        row = {
+            "name": name,
+            "vqvae_size": vqvae_size,
+            "sc_config": sc_config,
+            "nsp_size": nsp_size,
+            "tokens_per_sample": TOKENS_PER_SAMPLE[sc_config],
+            "total_params": VQVAE_PARAMS[vqvae_size] + NSP_PARAMS[nsp_size],
+            "best_temps": best_t,
+        }
+        row.update(best)
+
+        # CE/RMSE from deterministic eval (no T suffix there).
+        lookup_name = f"{vqvae_size}-{sc_config}-nsp-{nsp_size}"
+        for ev_name, ev in eval_runs.items():
+            if ev_name == lookup_name:
+                s = ev.summary
+                row["cross_entropy"] = s.get("cross_entropy")
+                row["ce_per_token"] = compute_ce_per_token(s, sc_config)
+                row["pixel_rmse"] = s.get("pixel_rmse")
+                break
+
+        rollout_rows.append(row)
+
+    print(f"Fetched {len(rollout_rows)} sampling-rollout experiments "
+          f"(best-T per metric across {len(sampling_runs)} runs)")
+    return rollout_rows
+
+
 def fetch_single_step_metrics():
     """Fetch all single-step metrics (CE, RMSE, spectra, EMD) from gust2-eval."""
-    api = wandb.Api()
+    eval_runs = _latest_per_name(EVAL_PROJECT)
 
     rows = []
-    for r in api.runs(f"{ENTITY}/{EVAL_PROJECT}"):
-        name = r.name
+    for name, r in eval_runs.items():
         if not any(sz in name for sz in ["small", "medium", "large"]):
             continue
         try:
@@ -141,6 +262,7 @@ def fetch_single_step_metrics():
             "tokens_per_sample": TOKENS_PER_SAMPLE[sc_config],
             "total_params": VQVAE_PARAMS[vqvae_size] + NSP_PARAMS[nsp_size],
             "cross_entropy": s.get("cross_entropy"),
+            "ce_per_token": compute_ce_per_token(s, sc_config),
             "pixel_rmse": s.get("pixel_rmse"),
             "tke_rse_nsp": s.get("tke_rse/nsp"),
             "enstrophy_rse_nsp": s.get("enstrophy_rse/nsp"),
@@ -273,22 +395,80 @@ def fig_vs_tokens(rows, output_path, title="Scaling vs Sequence Length"):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", default="plots/scaling")
+    parser.add_argument("--vqvae", type=str, default=None,
+                        help="Filter to VQ-VAE size (small, medium, large)")
+    parser.add_argument("--sampling_rollout", action="store_true",
+                        help="Use gust2-sampling (temperature sweep) for "
+                             "rollout metrics; takes best T per metric.")
+    parser.add_argument("--per_temperature", action="store_true",
+                        help="Emit one set of sampling-rollout plots per "
+                             "temperature instead of reducing across T.")
+    parser.add_argument("--temperatures", type=float, nargs="+",
+                        default=[0.7, 1.0, 1.2],
+                        help="Temperatures to plot when --per_temperature.")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    rollout_rows = fetch_rollout_metrics()
+    per_temperature_runs = []
+    if args.per_temperature:
+        for T in args.temperatures:
+            rows = fetch_sampling_rollout_metrics(temperature=T)
+            per_temperature_runs.append(
+                (rows, f" (T={T})", f"_T{T}"))
+        rollout_rows = None
+    elif args.sampling_rollout:
+        rollout_rows = fetch_sampling_rollout_metrics()
+        rollout_title_suffix = " (best-T sampling)"
+        rollout_file_suffix = "_sampling"
+        print("\nBest temperature per (model, metric):")
+        print(f"  {'config':<28}{'tke':>5}{'ens':>5}{'emd':>5}")
+        for r in sorted(rollout_rows,
+                        key=lambda r: (r["vqvae_size"], r["sc_config"], r["nsp_size"])):
+            bt = r.get("best_temps", {})
+            print(f"  {r['name']:<28}"
+                  f"{bt.get('tke_rse_nsp', '-'):>5}"
+                  f"{bt.get('enstrophy_rse_nsp', '-'):>5}"
+                  f"{bt.get('emd_nsp', '-'):>5}")
+    else:
+        rollout_rows = fetch_rollout_metrics()
+        rollout_title_suffix = ""
+        rollout_file_suffix = ""
     single_step_rows = fetch_single_step_metrics()
 
-    print("\n--- Figure 1: rollout metric vs total params ---")
-    fig_vs_total_params(rollout_rows,
-                        os.path.join(args.output_dir, "rollout_vs_params.png"),
-                        title="Rollout Scaling vs Total Parameters")
+    if args.vqvae:
+        if rollout_rows is not None:
+            rollout_rows = [r for r in rollout_rows if r["vqvae_size"] == args.vqvae]
+        per_temperature_runs = [
+            ([r for r in rows if r["vqvae_size"] == args.vqvae], ts, fs)
+            for rows, ts, fs in per_temperature_runs
+        ]
+        single_step_rows = [r for r in single_step_rows if r["vqvae_size"] == args.vqvae]
+        print(f"Filtered to vqvae={args.vqvae}")
 
-    print("\n--- Figure 2: rollout metric vs tokens/sample ---")
-    fig_vs_tokens(rollout_rows,
-                  os.path.join(args.output_dir, "rollout_vs_tokens.png"),
-                  title="Rollout Scaling vs Sequence Length")
+    if args.per_temperature:
+        for rows, ts, fs in per_temperature_runs:
+            print(f"\n--- Rollout plots for T{fs[2:]} ({len(rows)} experiments) ---")
+            fig_vs_total_params(
+                rows,
+                os.path.join(args.output_dir, f"rollout_vs_params{fs}.png"),
+                title=f"Rollout Scaling vs Total Parameters{ts}")
+            fig_vs_tokens(
+                rows,
+                os.path.join(args.output_dir, f"rollout_vs_tokens{fs}.png"),
+                title=f"Rollout Scaling vs Sequence Length{ts}")
+    else:
+        print("\n--- Figure 1: rollout metric vs total params ---")
+        fig_vs_total_params(
+            rollout_rows,
+            os.path.join(args.output_dir, f"rollout_vs_params{rollout_file_suffix}.png"),
+            title=f"Rollout Scaling vs Total Parameters{rollout_title_suffix}")
+
+        print("\n--- Figure 2: rollout metric vs tokens/sample ---")
+        fig_vs_tokens(
+            rollout_rows,
+            os.path.join(args.output_dir, f"rollout_vs_tokens{rollout_file_suffix}.png"),
+            title=f"Rollout Scaling vs Sequence Length{rollout_title_suffix}")
 
     print("\n--- Figure 3: single-step metric vs total params ---")
     fig_vs_total_params(single_step_rows,

@@ -141,8 +141,10 @@ def make_predict_and_loss(config, scales_t0, padded_len_t0,
 
         Returns:
             predicted: (tokens_per_frame,) greedy or sampled predictions
-            weighted_ce: scalar weighted cross-entropy
-            per_scale_ce: (n_trainable,) raw CE per scale
+            weighted_ce: scalar weighted cross-entropy (OOD-masked)
+            per_scale_ce: (n_trainable,) raw CE per scale (OOD-masked)
+            per_scale_ood: (n_trainable,) fraction of val tokens whose GT
+                compact index falls outside this scale's training vocabulary
         """
         # Build input: [t0_padded, t1_truncated_padded]
         # For eval we teacher-force t1 context so the CE is comparable to
@@ -165,6 +167,7 @@ def make_predict_and_loss(config, scales_t0, padded_len_t0,
         predicted = jnp.zeros(tokens_per_frame, dtype=jnp.int32)
         total_ce = jnp.float32(0.0)
         per_scale_ce_list = []
+        per_scale_ood_list = []
 
         for i, scale_idx in enumerate(trainable_indices):
             h_k, w_k = config.scales[scale_idx]
@@ -210,18 +213,29 @@ def make_predict_and_loss(config, scales_t0, padded_len_t0,
             tgt_end = boundaries_full[scale_idx + 1]
             predicted = predicted.at[tgt_start:tgt_end].set(preds)
 
-            # Cross-entropy against GT
+            # Cross-entropy against GT. Skip targets whose compact index is
+            # outside this scale's training-time vocabulary (scale_masks is
+            # fit on train; val occasionally produces unseen-at-scale tokens).
+            # The mask above sets those positions' logits to -1e9, so
+            # including them here would pollute the mean CE with ~1e9 per
+            # OOD token. Track the OOD fraction separately.
             targets = t1_tokens[tgt_start:tgt_end]
+            in_mask = scale_masks[scale_idx][targets]            # (n_tokens_k,) bool
             log_probs = jax.nn.log_softmax(logits, axis=-1)
             target_log_probs = jnp.take_along_axis(
                 log_probs, targets[:, None], axis=-1
             ).squeeze(-1)
-            raw_ce = -jnp.mean(target_log_probs)
+            safe_lp = jnp.where(in_mask, target_log_probs, 0.0)
+            n_valid = jnp.maximum(jnp.sum(in_mask), 1)
+            raw_ce = -jnp.sum(safe_lp) / n_valid
+            ood_rate = 1.0 - jnp.sum(in_mask) / targets.shape[0]
             total_ce = total_ce + raw_ce * scale_weights[scale_idx]
             per_scale_ce_list.append(raw_ce)
+            per_scale_ood_list.append(ood_rate)
 
         per_scale_ce = jnp.stack(per_scale_ce_list)
-        return predicted, total_ce, per_scale_ce
+        per_scale_ood = jnp.stack(per_scale_ood_list)
+        return predicted, total_ce, per_scale_ce, per_scale_ood
 
     return predict_and_loss
 
@@ -347,6 +361,7 @@ def main():
 
     all_ce = []
     all_per_scale_ce = []
+    all_per_scale_ood = []
     all_pred_tokens = []
     all_gt_tokens = []
 
@@ -360,11 +375,12 @@ def main():
         t0 = jnp.array(indices[i])
         t1 = jnp.array(indices[i + 1])
 
-        predicted, ce, per_scale_ce = predict_and_loss(
+        predicted, ce, per_scale_ce, per_scale_ood = predict_and_loss(
             model, exp_heads, t0, t1, sample_keys[i])
 
         all_ce.append(float(ce))
         all_per_scale_ce.append(np.array(per_scale_ce))
+        all_per_scale_ood.append(np.array(per_scale_ood))
         all_pred_tokens.append(np.array(predicted))
         all_gt_tokens.append(np.array(t1))
 
@@ -380,11 +396,15 @@ def main():
     # --- Cross-entropy results ---
     mean_ce = float(np.mean(all_ce))
     per_scale_means = np.mean(np.stack(all_per_scale_ce), axis=0)
+    per_scale_ood_means = np.mean(np.stack(all_per_scale_ood), axis=0)
+    mean_ood = float(np.mean(per_scale_ood_means))
 
-    print(f"\nCross-entropy: {mean_ce:.4f}")
+    print(f"\nCross-entropy (OOD-masked): {mean_ce:.4f}")
+    print(f"Mean OOD rate across scales: {mean_ood:.4%}")
     for j, idx in enumerate(trainable_indices):
         h, w = config.scales[idx]
-        print(f"  Scale {h}x{w}: {per_scale_means[j]:.4f}")
+        print(f"  Scale {h}x{w}: CE={per_scale_means[j]:.4f}  "
+              f"OOD={per_scale_ood_means[j]:.4%}")
 
     # --- Pixel RMSE ---
     print("\nDecoding predicted tokens...")
@@ -417,7 +437,8 @@ def main():
     print(f"  VQ-VAE recon:   {vqvae_rmse:.6f}")
 
     # --- Save per-timestep metrics ---
-    per_scale_ce_arr = np.stack(all_per_scale_ce)  # (n_pairs, n_trainable)
+    per_scale_ce_arr = np.stack(all_per_scale_ce)      # (n_pairs, n_trainable)
+    per_scale_ood_arr = np.stack(all_per_scale_ood)    # (n_pairs, n_trainable)
     scale_names = [f"{config.scales[idx][0]}x{config.scales[idx][1]}"
                    for idx in trainable_indices]
 
@@ -425,6 +446,7 @@ def main():
     np.savez_compressed(timestep_path,
         cross_entropy=np.array(all_ce),             # (n_pairs,)
         per_scale_ce=per_scale_ce_arr,               # (n_pairs, n_trainable)
+        per_scale_ood=per_scale_ood_arr,             # (n_pairs, n_trainable)
         scale_names=np.array(scale_names),           # (n_trainable,)
         pixel_rmse=per_sample_rmse,                  # (n_pairs,)
         vqvae_pixel_rmse=per_sample_vqvae_rmse,      # (n_pairs,)
@@ -549,10 +571,15 @@ def main():
         "n_pairs": n_pairs,
         "scales": list(scales_int),
         "cross_entropy": mean_ce,
+        "ood_rate_mean": mean_ood,
         "pixel_rmse": mean_rmse,
         "vqvae_pixel_rmse": vqvae_rmse,
         "per_scale_ce": {
             f"{config.scales[idx][0]}x{config.scales[idx][1]}": float(per_scale_means[j])
+            for j, idx in enumerate(trainable_indices)
+        },
+        "per_scale_ood_rate": {
+            f"{config.scales[idx][0]}x{config.scales[idx][1]}": float(per_scale_ood_means[j])
             for j, idx in enumerate(trainable_indices)
         },
         "tke_rse_vqvae": tke_rse_vqvae,
@@ -593,6 +620,7 @@ def main():
 
         log_dict = {
             "cross_entropy": mean_ce,
+            "ood_rate_mean": mean_ood,
             "pixel_rmse": mean_rmse,
             "vqvae_pixel_rmse": vqvae_rmse,
             "tke_rse/vqvae": tke_rse_vqvae,
@@ -610,6 +638,7 @@ def main():
         for j, idx in enumerate(trainable_indices):
             h, w = config.scales[idx]
             log_dict[f"ce/scale_{h}x{w}"] = float(per_scale_means[j])
+            log_dict[f"ood_rate/scale_{h}x{w}"] = float(per_scale_ood_means[j])
 
         wandb.log(log_dict)
         wandb.finish()

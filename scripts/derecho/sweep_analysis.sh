@@ -35,10 +35,12 @@ FILTER_VQVAE=""
 DRY_RUN=false
 LIST_ONLY=false
 DEPEND_JOBID=""
+FORCE=false
 
 print_help() {
     cat <<EOF
-Usage: $0 <sc341|sc917|sc1941> [small|medium|large] [--vqvae <size>] [--depend <jobid>] [--dry-run] [--list]
+Usage: $0 <sc341|sc917|sc1941> [small|medium|large] [--vqvae <size>]
+         [--force] [--depend <jobid>] [--dry-run] [--list]
 
 Positional:
   <sc341|sc917|sc1941>          Scale config (required).
@@ -46,11 +48,16 @@ Positional:
 
 Options:
   --vqvae <small|medium|large>  Only run combos whose VQ-VAE size matches.
+  --force                       Overwrite existing metrics.json instead of
+                                skipping.
   --depend <jobid>              Submit with PBS afterok dependency on <jobid>.
                                 Useful for chaining after sweep_rollout.sh.
   --dry-run                     Print the PBS script without submitting.
   --list                        Show the task list for the given SC and exit.
   --help, -h                    This message.
+
+(Also accepts --temperature <T> as a no-op, so sweep_multistep.sh can
+forward a single arg set to both rollout and analysis.)
 EOF
 }
 
@@ -59,6 +66,8 @@ while [[ $# -gt 0 ]]; do
         sc341|sc917|sc1941) SC="$1"; shift ;;
         small|medium|large) FILTER_NSP="$1"; shift ;;
         --vqvae) FILTER_VQVAE="$2"; shift 2 ;;
+        --temperature) shift 2 ;;                    # forwarded; analysis ignores T
+        --force) FORCE=true; shift ;;
         --depend) DEPEND_JOBID="$2"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
         --list) LIST_ONLY=true; shift ;;
@@ -129,8 +138,8 @@ for t in "${TASKS[@]}"; do
             echo "[skip] ${RUN}: no VQ-VAE checkpoint at ${VQDIR}"
             continue
         fi
-        if [ -f "${OUT}/metrics.json" ]; then
-            echo "[skip] ${RUN}: analysis already exists"
+        if [ "${FORCE}" = false ] && [ -f "${OUT}/metrics.json" ]; then
+            echo "[skip] ${RUN}: analysis already exists (pass --force to overwrite)"
             continue
         fi
     fi

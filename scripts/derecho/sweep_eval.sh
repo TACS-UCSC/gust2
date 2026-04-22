@@ -42,10 +42,13 @@ SC=""
 FILTER_NSP=""
 FILTER_VQVAE=""
 DRY_RUN=false
+FORCE=false
+TEMPERATURE="0.0"
 
 print_help() {
     cat <<EOF
-Usage: $0 <sc341|sc917|sc1941> [small|medium|large] [--vqvae <size>] [--dry-run] [--list]
+Usage: $0 <sc341|sc917|sc1941> [small|medium|large] [--vqvae <size>]
+         [--temperature <T>] [--force] [--dry-run] [--list]
 
 Positional:
   <sc341|sc917|sc1941>          Scale config (required).
@@ -53,6 +56,9 @@ Positional:
 
 Options:
   --vqvae <small|medium|large>  Only run combos whose VQ-VAE size matches.
+  --temperature <T>             Sampling temperature (default 0.0 = greedy).
+  --force                       Overwrite existing eval_single_step.json
+                                instead of skipping.
   --dry-run                     Print the PBS script without submitting.
   --list                        Show the task list for the given SC and exit.
   --help, -h                    This message.
@@ -64,6 +70,8 @@ while [[ $# -gt 0 ]]; do
         sc341|sc917|sc1941) SC="$1"; shift ;;
         small|medium|large) FILTER_NSP="$1"; shift ;;
         --vqvae) FILTER_VQVAE="$2"; shift 2 ;;
+        --temperature) TEMPERATURE="$2"; shift 2 ;;
+        --force) FORCE=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         --list) LIST_ONLY=true; shift ;;
         --help|-h) print_help; exit 0 ;;
@@ -143,8 +151,8 @@ for t in "${TASKS[@]}"; do
             echo "[skip] ${RUN}: no VQ-VAE checkpoint at ${VQDIR}"
             continue
         fi
-        if [ -f "${OUT}/eval_single_step.json" ]; then
-            echo "[skip] ${RUN}: eval already exists"
+        if [ "${FORCE}" = false ] && [ -f "${OUT}/eval_single_step.json" ]; then
+            echo "[skip] ${RUN}: eval already exists (pass --force to overwrite)"
             continue
         fi
     fi
@@ -229,6 +237,7 @@ run_task() {
         --data_path "${DATA_PATH}" \\
         --output_dir "\${out}" \\
         --batch_size 64 \\
+        --temperature ${TEMPERATURE} \\
         --wandb_project ${WANDB_PROJECT} \\
         --wandb_name "\${run}" \\
         --wandb_group "\${nsp}" \\
