@@ -29,8 +29,8 @@ WANDB_BASE="${SCRATCH}/wandb"
 ACCOUNT="UCSC0009"
 
 # ---------- Shared model config ----------
-N_EMBD=1024
-N_HEAD=8
+# N_EMBD, N_HEAD, N_LAYER are per-size and set by set_nsp_size below.
+# Only N_REFINE_LAYERS is shared across sizes.
 N_REFINE_LAYERS=2
 
 # ---------- Shared training config ----------
@@ -54,13 +54,21 @@ VQVAE_NAMES=(
 )
 
 # ---------- NSP model sizes ----------
+# Below-small sizes (nano/micro/mini) are for Chinchilla-ish ablations where
+# current "small" (63M) is already 30-185x over the data-optimal count for
+# the sc341/sc917/sc1941 configs. Keep same SwiGLU/RMSNorm architecture; only
+# width and depth change. head_dim=64 for the new sizes to stay in the cuDNN
+# flash-attn sweet spot.
 set_nsp_size() {
     case "$1" in
-        small)  N_LAYER=4 ;;
-        medium) N_LAYER=8 ;;
-        large)  N_LAYER=16 ;;
+        nano)   N_LAYER=2;  N_EMBD=256;  N_HEAD=4 ;;   # ~2M params
+        micro)  N_LAYER=3;  N_EMBD=384;  N_HEAD=6 ;;   # ~6M
+        mini)   N_LAYER=4;  N_EMBD=512;  N_HEAD=8 ;;   # ~14M
+        small)  N_LAYER=4;  N_EMBD=1024; N_HEAD=8 ;;   # ~63M
+        medium) N_LAYER=8;  N_EMBD=1024; N_HEAD=8 ;;   # ~115M
+        large)  N_LAYER=16; N_EMBD=1024; N_HEAD=8 ;;   # ~215M
         *)
-            echo "Unknown NSP size: $1. Use small, medium, or large." >&2
+            echo "Unknown NSP size: $1. Use nano, micro, mini, small, medium, or large." >&2
             exit 1
             ;;
     esac
@@ -97,9 +105,15 @@ while [[ $# -gt 0 ]]; do
         --dry-run) DRY_RUN=true; shift ;;
         --list)
             echo "NSP sizes (4 A100-40 each, global batch=${BATCH_SIZE}):"
-            echo "  small:  4L,  n_embd=${N_EMBD}, refine=${N_REFINE_LAYERS}"
-            echo "  medium: 8L,  n_embd=${N_EMBD}, refine=${N_REFINE_LAYERS}"
-            echo "  large:  16L, n_embd=${N_EMBD}, refine=${N_REFINE_LAYERS}"
+            echo "  nano:   2L,  n_embd=256,  n_head=4,  refine=${N_REFINE_LAYERS}  (~2M params)"
+            echo "  micro:  3L,  n_embd=384,  n_head=6,  refine=${N_REFINE_LAYERS}  (~6M)"
+            echo "  mini:   4L,  n_embd=512,  n_head=8,  refine=${N_REFINE_LAYERS}  (~14M)"
+            echo "  small:  4L,  n_embd=1024, n_head=8,  refine=${N_REFINE_LAYERS}  (~63M)"
+            echo "  medium: 8L,  n_embd=1024, n_head=8,  refine=${N_REFINE_LAYERS}  (~115M)"
+            echo "  large:  16L, n_embd=1024, n_head=8,  refine=${N_REFINE_LAYERS}  (~215M)"
+            echo ""
+            echo "Default filter: small,medium,large (the three historical sizes)."
+            echo "Pass nano, micro, or mini explicitly to run the sub-small ablation."
             echo ""
             echo "VQ-VAE token sources:"
             for v in "${VQVAE_NAMES[@]}"; do echo "  ${v}"; done
@@ -110,11 +124,15 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help|-h)
             cat <<EOF
-Usage: $0 [small|medium|large] [--vqvae <name>] [--chain N] [--after <jobids>]
-         [--dry-run] [--list]
+Usage: $0 [nano|micro|mini|small|medium|large] [--vqvae <name>]
+         [--chain N] [--after <jobids>] [--dry-run] [--list]
 
 Options:
-  [small|medium|large]   NSP-size filter (default: all).
+  [size]                 NSP-size filter. Recognized sizes:
+                           nano, micro, mini  (sub-small ablation fleet)
+                           small, medium, large  (historical sizes)
+                         Default: small,medium,large. Pass nano/micro/mini
+                         explicitly when you want the ablation.
   --vqvae <name>         Substring match on VQ-VAE config name (e.g. sc1941).
   --chain N              Submit N jobs per combo, linked via PBS
                          afterany dependencies. Each job passes --resume
@@ -141,7 +159,7 @@ EOF
         --after)
             AFTER_JOBIDS="$2"; shift 2
             ;;
-        small|medium|large)
+        nano|micro|mini|small|medium|large)
             FILTER_NSP="$1"; shift
             ;;
         *)
@@ -169,7 +187,7 @@ fi
 
 echo "=========================================="
 echo "NSP Training Sweep (Derecho)"
-echo "  n_embd=${N_EMBD}, global batch=${BATCH_SIZE}, 4 GPU/job"
+echo "  global batch=${BATCH_SIZE}, 4 GPU/job (width/depth per size; run --list for details)"
 echo "  NSP sizes: ${NSP_SIZES[*]}"
 echo "  VQ-VAE sources: ${#VQVAE_NAMES[@]} configs"
 echo "  Chain length per combo: ${CHAIN}"
