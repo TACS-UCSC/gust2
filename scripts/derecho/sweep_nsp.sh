@@ -89,6 +89,8 @@ get_or_create_wandb_id() {
 DRY_RUN=false
 FILTER_NSP=""
 FILTER_VQVAE=""
+CHAIN=1
+AFTER_JOBIDS=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -107,11 +109,37 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         --help|-h)
-            echo "Usage: $0 [small|medium|large] [--vqvae <name>] [--dry-run] [--list]"
+            cat <<EOF
+Usage: $0 [small|medium|large] [--vqvae <name>] [--chain N] [--after <jobids>]
+         [--dry-run] [--list]
+
+Options:
+  [small|medium|large]   NSP-size filter (default: all).
+  --vqvae <name>         Substring match on VQ-VAE config name (e.g. sc1941).
+  --chain N              Submit N jobs per combo, linked via PBS
+                         afterany dependencies. Each job passes --resume
+                         so it picks up the checkpoint that the
+                         predecessor wrote. Default 1 (current behavior).
+  --after <jobids>       Comma-separated list of predecessor jobids —
+                         one entry per combo, in the same order combos
+                         are submitted (outer loop = VQ-VAE, inner =
+                         NSP). The first job of each new chain will
+                         depend on the corresponding predecessor.
+                         Example use case: the first 12h batch is
+                         already running and you want to queue a second
+                         (and third) wave before walltime hits.
+  --dry-run, --list      As before.
+EOF
             exit 0
             ;;
         --vqvae)
             FILTER_VQVAE="$2"; shift 2
+            ;;
+        --chain)
+            CHAIN="$2"; shift 2
+            ;;
+        --after)
+            AFTER_JOBIDS="$2"; shift 2
             ;;
         small|medium|large)
             FILTER_NSP="$1"; shift
@@ -144,12 +172,32 @@ echo "NSP Training Sweep (Derecho)"
 echo "  n_embd=${N_EMBD}, global batch=${BATCH_SIZE}, 4 GPU/job"
 echo "  NSP sizes: ${NSP_SIZES[*]}"
 echo "  VQ-VAE sources: ${#VQVAE_NAMES[@]} configs"
+echo "  Chain length per combo: ${CHAIN}"
 echo "  Walltime: 12h/job (resubmit to resume)"
 echo "  Dry run: ${DRY_RUN}"
 echo "=========================================="
 echo ""
 
+# Parse --after jobids into an array and validate length matches #combos.
+if [ -n "${AFTER_JOBIDS}" ]; then
+    IFS=',' read -r -a AFTER_ARR <<< "${AFTER_JOBIDS}"
+    EXPECTED=$(( ${#VQVAE_NAMES[@]} * ${#NSP_SIZES[@]} ))
+    if [ "${#AFTER_ARR[@]}" -ne "${EXPECTED}" ]; then
+        echo "Error: --after supplied ${#AFTER_ARR[@]} jobid(s); expected ${EXPECTED} (one per combo in order)." >&2
+        echo "Combos in order:" >&2
+        for V in "${VQVAE_NAMES[@]}"; do
+            for N in "${NSP_SIZES[@]}"; do
+                echo "  ${V}-nsp-${N}" >&2
+            done
+        done
+        exit 1
+    fi
+else
+    AFTER_ARR=()
+fi
+
 N_SUBMITTED=0
+COMBO_IDX=0
 
 for VQVAE_NAME in "${VQVAE_NAMES[@]}"; do
     TOKENS_PATH="${TOKENS_BASE}/${VQVAE_NAME}.npz"
@@ -172,7 +220,8 @@ for VQVAE_NAME in "${VQVAE_NAMES[@]}"; do
         VQVAE_SIZE="${VQVAE_NAME%%-*}"
         WANDB_GROUP="${VQVAE_SIZE}-nsp-${NSP_SIZE}"
 
-        # Auto-detect resume.
+        # Auto-detect resume. For chained jobs (chain index > 1) we force
+        # --resume since the predecessor will have written a checkpoint.
         RESUME_FLAG=""
         if [ -f "${CHECKPOINT_DIR}/training_state.json" ]; then
             RESUME_FLAG="--resume"
@@ -180,6 +229,20 @@ for VQVAE_NAME in "${VQVAE_NAMES[@]}"; do
 
         # Persistent wandb id (first submit generates, later submits reuse).
         WANDB_ID=$(get_or_create_wandb_id "${CHECKPOINT_DIR}")
+
+        # Predecessor jobid for the first chain link (if --after supplied).
+        PREV_JOBID=""
+        if [ "${#AFTER_ARR[@]}" -gt 0 ]; then
+            PREV_JOBID="${AFTER_ARR[${COMBO_IDX}]}"
+        fi
+
+        for CHAIN_I in $(seq 1 "${CHAIN}"); do
+            # Chain link 2+ always --resume, even if training_state.json
+            # doesn't exist yet at submit time (predecessor will write it).
+            CHAIN_RESUME_FLAG="${RESUME_FLAG}"
+            if [ "${CHAIN_I}" -gt 1 ]; then
+                CHAIN_RESUME_FLAG="--resume"
+            fi
 
         TMPFILE="$(mktemp /tmp/nsp_${RUN_NAME}_XXXXXX.pbs)"
         cat > "${TMPFILE}" << PBS_EOF
@@ -219,7 +282,8 @@ echo "Tokens:    ${TOKENS_PATH}"
 echo "Ckpt dir:  ${CHECKPOINT_DIR}"
 echo "Batch:     ${BATCH_SIZE}  (16/GPU)"
 echo "Wandb id:  ${WANDB_ID}"
-echo "Resume:    ${RESUME_FLAG:-no}"
+echo "Resume:    ${CHAIN_RESUME_FLAG:-no}"
+echo "Chain:     ${CHAIN_I}/${CHAIN}"
 echo "=========================================="
 
 python train_nsp.py \\
@@ -242,21 +306,36 @@ python train_nsp.py \\
     --wandb_group ${WANDB_GROUP} \\
     --wandb_dir "${WANDB_BASE}" \\
     --wandb_id ${WANDB_ID} \\
-    ${RESUME_FLAG}
+    ${CHAIN_RESUME_FLAG}
 
 echo "=========================================="
 echo "Finished:  \$(date)"
 echo "=========================================="
 PBS_EOF
 
-        if [ "${DRY_RUN}" = true ]; then
-            echo "[dry-run] ${RUN_NAME}  wandb_id=${WANDB_ID}  resume=${RESUME_FLAG:-no}"
-        else
-            echo "Submitting ${RUN_NAME} (wandb_id=${WANDB_ID}, resume=${RESUME_FLAG:-no})..."
-            qsub "${TMPFILE}"
-            rm -f "${TMPFILE}"
-        fi
-        N_SUBMITTED=$((N_SUBMITTED + 1))
+            QSUB_ARGS=()
+            if [ -n "${PREV_JOBID}" ]; then
+                QSUB_ARGS+=(-W "depend=afterany:${PREV_JOBID}")
+            fi
+
+            if [ "${DRY_RUN}" = true ]; then
+                echo "[dry-run] ${RUN_NAME}  chain=${CHAIN_I}/${CHAIN}  wandb_id=${WANDB_ID}  resume=${CHAIN_RESUME_FLAG:-no}  after=${PREV_JOBID:-none}"
+                # Fabricate a pseudo-jobid so chain visualization looks right.
+                PREV_JOBID="dry-${RUN_NAME}-${CHAIN_I}"
+            else
+                DEPEND_MSG=""
+                if [ -n "${PREV_JOBID}" ]; then
+                    DEPEND_MSG=" after=${PREV_JOBID}"
+                fi
+                echo "Submitting ${RUN_NAME} chain ${CHAIN_I}/${CHAIN} (wandb_id=${WANDB_ID}, resume=${CHAIN_RESUME_FLAG:-no}${DEPEND_MSG})..."
+                NEW_JOBID=$(qsub "${QSUB_ARGS[@]}" "${TMPFILE}")
+                rm -f "${TMPFILE}"
+                echo "  -> ${NEW_JOBID}"
+                PREV_JOBID="${NEW_JOBID}"
+            fi
+            N_SUBMITTED=$((N_SUBMITTED + 1))
+        done   # end CHAIN_I loop
+        COMBO_IDX=$((COMBO_IDX + 1))
     done
 done
 
