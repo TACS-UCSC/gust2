@@ -34,7 +34,7 @@ DRY_RUN=false
 LIST_ONLY=false
 DEPEND_JOBID=""
 FORCE=false
-TEMPERATURE="0.0"
+TEMPERATURE="1.0"
 
 print_help() {
     cat <<EOF
@@ -47,7 +47,9 @@ Positional:
 
 Options:
   --vqvae <small|medium|large>  Only run combos whose VQ-VAE size matches.
-  --temperature <T>             Sampling temperature (default 0.0 = greedy).
+  --temperature <T>             Sampling temperature (default 1.0; pass 0.0
+                                for greedy, but greedy is discouraged on this
+                                project — see project memory).
   --force                       Overwrite existing rollout_tokens.npz
                                 instead of skipping.
   --depend <jobid>              Submit with PBS afterok dependency on <jobid>.

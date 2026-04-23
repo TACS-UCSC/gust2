@@ -43,7 +43,7 @@ FILTER_NSP=""
 FILTER_VQVAE=""
 DRY_RUN=false
 FORCE=false
-TEMPERATURE="0.0"
+TEMPERATURE="1.0"
 
 print_help() {
     cat <<EOF
@@ -56,7 +56,9 @@ Positional:
 
 Options:
   --vqvae <small|medium|large>  Only run combos whose VQ-VAE size matches.
-  --temperature <T>             Sampling temperature (default 0.0 = greedy).
+  --temperature <T>             Sampling temperature (default 1.0; pass 0.0
+                                for greedy, but greedy is discouraged on this
+                                project — see project memory).
   --force                       Overwrite existing eval_single_step.json
                                 instead of skipping.
   --dry-run                     Print the PBS script without submitting.
