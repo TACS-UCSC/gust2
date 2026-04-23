@@ -39,12 +39,14 @@ FORCE=false
 
 print_help() {
     cat <<EOF
-Usage: $0 <sc341|sc917|sc1941> [small|medium|large] [--vqvae <size>]
-         [--force] [--depend <jobid>] [--dry-run] [--list]
+Usage: $0 <sc341|sc917|sc1941> [nano|micro|mini|small|medium|large]
+         [--vqvae <size>] [--force] [--depend <jobid>] [--dry-run] [--list]
 
 Positional:
   <sc341|sc917|sc1941>          Scale config (required).
-  [small|medium|large]          Optional NSP size filter.
+  [nsp-size]                    Optional NSP size filter (default:
+                                small,medium,large). Use nano/micro/mini
+                                for the sub-small ablation fleet.
 
 Options:
   --vqvae <small|medium|large>  Only run combos whose VQ-VAE size matches.
@@ -64,7 +66,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         sc341|sc917|sc1941) SC="$1"; shift ;;
-        small|medium|large) FILTER_NSP="$1"; shift ;;
+        nano|micro|mini|small|medium|large) FILTER_NSP="$1"; shift ;;
         --vqvae) FILTER_VQVAE="$2"; shift 2 ;;
         --temperature) shift 2 ;;                    # forwarded; analysis ignores T
         --force) FORCE=true; shift ;;
