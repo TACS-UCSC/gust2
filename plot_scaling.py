@@ -82,6 +82,15 @@ NSP_LABELS = {
 VQVAE_MARKERS = {"small": "o", "medium": "s", "large": "D"}
 VQVAE_LABELS = {"small": "VQ 31M", "medium": "VQ 57M", "large": "VQ 109M"}
 
+# Used when --sc filter collapses to a single config, so SC-as-color becomes
+# degenerate and we color by VQ-VAE instead. Wong-palette colors not used by
+# NSP_COLORS so the two legends remain visually distinct.
+VQVAE_COLORS = {
+    "small":  WONG_BLUE,        # deep blue
+    "medium": WONG_PINK,        # pink
+    "large":  WONG_ORANGE,      # orange
+}
+
 NSP_SIZES_ORDERED = ["nano", "micro", "mini", "small", "medium", "large"]
 VQVAE_SIZES_ORDERED = ["small", "medium", "large"]
 SC_ORDERED = ["sc341", "sc917", "sc1941"]
@@ -308,9 +317,16 @@ def fetch_single_step_metrics():
 # ── Plotting ─────────────────────────────────────────────────────────────────
 
 
-def fig_vs_total_params(rows, output_path, title="Scaling vs Total Parameters"):
+def fig_vs_total_params(rows, output_path, title="Scaling vs Total Parameters",
+                         color_by="sc"):
     """3x2 figure: metric vs total params.
-    Color = tokens/sample, marker = VQ-VAE size."""
+
+    color_by:
+      "sc"    — color = tokens/sample (original), marker = VQ-VAE size.
+      "vqvae" — color = VQ-VAE size. Useful when the plot is filtered to a
+                single sc config (SC-color would be degenerate) and you want
+                per-VQ traces visually distinct.
+    """
     fig, axes = plt.subplots(3, 2, figsize=(12, 13))
     axes_flat = axes.flatten()
 
@@ -327,9 +343,13 @@ def fig_vs_total_params(rows, output_path, title="Scaling vs Total Parameters"):
                 subset.sort(key=lambda r: r["total_params"])
                 x = np.array([r["total_params"] / 1e6 for r in subset])
                 y = np.array([r[key] for r in subset])
+                if color_by == "vqvae":
+                    color = VQVAE_COLORS[vq_sz]
+                else:
+                    color = SC_COLORS[sc]
                 ax.plot(x, y,
                         marker=VQVAE_MARKERS[vq_sz],
-                        color=SC_COLORS[sc],
+                        color=color,
                         linewidth=1.5, markersize=8, alpha=0.85,
                         linestyle="-")
 
@@ -344,14 +364,22 @@ def fig_vs_total_params(rows, output_path, title="Scaling vs Total Parameters"):
     ax_legend.axis("off")
 
     handles = []
-    for sc in SC_ORDERED:
-        handles.append(Line2D([0], [0], color=SC_COLORS[sc], linewidth=2.5,
-                              label=SC_LABELS[sc]))
-    handles.append(Line2D([0], [0], color="none", label=""))
-    for vq_sz in VQVAE_SIZES_ORDERED:
-        handles.append(Line2D([0], [0], marker=VQVAE_MARKERS[vq_sz],
-                              color="0.3", linestyle="none", markersize=9,
-                              label=VQVAE_LABELS[vq_sz]))
+    if color_by == "vqvae":
+        for vq_sz in VQVAE_SIZES_ORDERED:
+            handles.append(Line2D([0], [0],
+                                  marker=VQVAE_MARKERS[vq_sz],
+                                  color=VQVAE_COLORS[vq_sz],
+                                  linewidth=2.5, markersize=9,
+                                  label=VQVAE_LABELS[vq_sz]))
+    else:
+        for sc in SC_ORDERED:
+            handles.append(Line2D([0], [0], color=SC_COLORS[sc], linewidth=2.5,
+                                  label=SC_LABELS[sc]))
+        handles.append(Line2D([0], [0], color="none", label=""))
+        for vq_sz in VQVAE_SIZES_ORDERED:
+            handles.append(Line2D([0], [0], marker=VQVAE_MARKERS[vq_sz],
+                                  color="0.3", linestyle="none", markersize=9,
+                                  label=VQVAE_LABELS[vq_sz]))
 
     ax_legend.legend(handles=handles, loc="center", fontsize=13,
                      frameon=True, fancybox=True, shadow=False,
@@ -432,7 +460,13 @@ def main():
                         choices=list(SC_ORDERED),
                         help="Filter to one or more sc configs (default: all). "
                              "When exactly one sc config is selected, "
-                             "vs_tokens plots are skipped (would be degenerate).")
+                             "vs_tokens plots are skipped (degenerate), and "
+                             "vs_params lines are colored by VQ-VAE size.")
+    parser.add_argument("--nsp", type=str, default=None, nargs="+",
+                        choices=list(NSP_SIZES_ORDERED),
+                        help="Filter to a subset of NSP sizes (default: all). "
+                             "Example: --nsp nano micro mini small to drop "
+                             "the heavily-overfit medium/large cells.")
     parser.add_argument("--sampling_rollout", action="store_true",
                         help="Use gust2-sampling (temperature sweep) for "
                              "rollout metrics; takes best T per metric.")
@@ -492,7 +526,20 @@ def main():
         ]
         single_step_rows = [r for r in single_step_rows if r["sc_config"] in sc_filter]
         print(f"Filtered to sc={sorted(sc_filter)}")
+
+    if args.nsp:
+        nsp_filter = set(args.nsp)
+        if rollout_rows is not None:
+            rollout_rows = [r for r in rollout_rows if r["nsp_size"] in nsp_filter]
+        per_temperature_runs = [
+            ([r for r in rows if r["nsp_size"] in nsp_filter], ts, fs)
+            for rows, ts, fs in per_temperature_runs
+        ]
+        single_step_rows = [r for r in single_step_rows if r["nsp_size"] in nsp_filter]
+        print(f"Filtered to nsp={sorted(nsp_filter)}")
+
     skip_vs_tokens = args.sc is not None and len(args.sc) == 1
+    color_by = "vqvae" if skip_vs_tokens else "sc"
 
     if args.per_temperature:
         for rows, ts, fs in per_temperature_runs:
@@ -500,7 +547,8 @@ def main():
             fig_vs_total_params(
                 rows,
                 os.path.join(args.output_dir, f"rollout_vs_params{fs}.png"),
-                title=f"Rollout Scaling vs Total Parameters{ts}")
+                title=f"Rollout Scaling vs Total Parameters{ts}",
+                color_by=color_by)
             if not skip_vs_tokens:
                 fig_vs_tokens(
                     rows,
@@ -511,7 +559,8 @@ def main():
         fig_vs_total_params(
             rollout_rows,
             os.path.join(args.output_dir, f"rollout_vs_params{rollout_file_suffix}.png"),
-            title=f"Rollout Scaling vs Total Parameters{rollout_title_suffix}")
+            title=f"Rollout Scaling vs Total Parameters{rollout_title_suffix}",
+            color_by=color_by)
 
         if not skip_vs_tokens:
             print("\n--- Figure 2: rollout metric vs tokens/sample ---")
@@ -523,7 +572,8 @@ def main():
     print("\n--- Figure 3: single-step metric vs total params ---")
     fig_vs_total_params(single_step_rows,
                         os.path.join(args.output_dir, "single_step_vs_params.png"),
-                        title="Single-Step Scaling vs Total Parameters")
+                        title="Single-Step Scaling vs Total Parameters",
+                        color_by=color_by)
 
     if not skip_vs_tokens:
         print("\n--- Figure 4: single-step metric vs tokens/sample ---")
