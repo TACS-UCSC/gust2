@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import time
 
@@ -121,10 +122,14 @@ def make_predict_and_loss(config, scales_t0, padded_len_t0,
 
     boundaries_full = config.scale_boundaries
 
-    # Per-scale loss weights (same as training: 1/sqrt(token_count), normalized)
+    # Per-scale loss weights: 1/log(token_count + 1), normalized, to match
+    # the training weighting in train_nsp.py (commit 9b31bcd, "log-weighted
+    # loss"). With this, the reported `cross_entropy` field is directly
+    # comparable to the training-loss curve logged in gust2-nsp-derecho.
+    # (Earlier versions of this file used 1/sqrt(c) which did not match.)
     token_counts = [config.scales[i][0] * config.scales[i][1]
                     for i in trainable_indices]
-    raw_weights = [1.0 / c ** 0.5 for c in token_counts]
+    raw_weights = [1.0 / math.log(c + 1.0) for c in token_counts]
     mean_w = sum(raw_weights) / len(raw_weights)
     scale_weights = {idx: w / mean_w
                      for idx, w in zip(trainable_indices, raw_weights)}
@@ -399,7 +404,19 @@ def main():
     per_scale_ood_means = np.mean(np.stack(all_per_scale_ood), axis=0)
     mean_ood = float(np.mean(per_scale_ood_means))
 
-    print(f"\nCross-entropy (OOD-masked): {mean_ce:.4f}")
+    # Token-weighted per-token CE (physically meaningful nats/token, independent
+    # of the training-signal scale weighting). This is what plot_scaling.py
+    # computes client-side in `compute_ce_per_token`; logging it server-side
+    # makes downstream plotting one less hop.
+    token_counts_trainable = np.array(
+        [config.scales[i][0] * config.scales[i][1] for i in trainable_indices],
+        dtype=np.float64)
+    ce_per_token = float(
+        np.sum(token_counts_trainable * per_scale_means) /
+        np.sum(token_counts_trainable))
+
+    print(f"\nCross-entropy (log-weighted, matches training): {mean_ce:.4f}")
+    print(f"Cross-entropy (per token, token-weighted):      {ce_per_token:.4f}")
     print(f"Mean OOD rate across scales: {mean_ood:.4%}")
     for j, idx in enumerate(trainable_indices):
         h, w = config.scales[idx]
@@ -571,6 +588,7 @@ def main():
         "n_pairs": n_pairs,
         "scales": list(scales_int),
         "cross_entropy": mean_ce,
+        "ce_per_token": ce_per_token,
         "ood_rate_mean": mean_ood,
         "pixel_rmse": mean_rmse,
         "vqvae_pixel_rmse": vqvae_rmse,
@@ -620,6 +638,7 @@ def main():
 
         log_dict = {
             "cross_entropy": mean_ce,
+            "ce_per_token": ce_per_token,
             "ood_rate_mean": mean_ood,
             "pixel_rmse": mean_rmse,
             "vqvae_pixel_rmse": vqvae_rmse,

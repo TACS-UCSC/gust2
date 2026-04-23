@@ -73,10 +73,15 @@ METRICS = [
 def compute_ce_per_token(summary, sc_config):
     """Aggregate per-scale CEs into a per-token mean.
 
-    Each scale logs its raw mean CE at ce/scale_HxW. Weight by token count
-    (H*W) and divide by total trainable tokens to get a fair per-token nat cost.
-    Returns None if any trainable scale is missing.
+    Prefers the server-side `ce_per_token` field if eval_single_step.py logged
+    it (runs after 2026-04-23). Falls back to the legacy client-side
+    computation (token-weighted mean of per-scale CEs) for older runs.
+    Returns None if neither source is available.
     """
+    ce_logged = summary.get("ce_per_token")
+    if ce_logged is not None:
+        return ce_logged
+
     scales = SC_TRAINABLE_SCALES[sc_config]
     total_nats = 0.0
     total_tokens = 0
