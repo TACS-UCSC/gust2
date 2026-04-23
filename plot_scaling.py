@@ -26,7 +26,14 @@ SAMPLING_PROJECT = "gust2-sampling-derecho"
 EVAL_PROJECT = "gust2-eval-derecho"
 
 VQVAE_PARAMS = {"small": 31e6, "medium": 57e6, "large": 109e6}
-NSP_PARAMS = {"small": 63e6, "medium": 115e6, "large": 215e6}
+NSP_PARAMS = {
+    "nano":   2e6,
+    "micro":  6e6,
+    "mini":   14e6,
+    "small":  63e6,
+    "medium": 115e6,
+    "large":  215e6,
+}
 TOKENS_PER_SAMPLE = {"sc341": 341, "sc917": 917, "sc1941": 1941}
 
 # Trainable scales per sc config (1x1 is free context; we predict from 2x2 up).
@@ -50,13 +57,32 @@ WONG_GREEN = "#009E73"
 SC_COLORS = {"sc341": WONG_BLUE, "sc917": WONG_ORANGE, "sc1941": WONG_PINK}
 SC_LABELS = {"sc341": "341 tok", "sc917": "917 tok", "sc1941": "1941 tok"}
 
-NSP_COLORS = {"small": WONG_SKYBLUE, "medium": WONG_VERMILLION, "large": WONG_GREEN}
-NSP_LABELS = {"small": "NSP 63M", "medium": "NSP 115M", "large": "NSP 215M"}
+# Tol-inspired extensions for the ablation sizes; Wong-6 kept for small/medium/large.
+TOL_ROSE   = "#882255"
+TOL_GOLD   = "#DDAA33"
+TOL_TEAL   = "#44AA99"
+
+NSP_COLORS = {
+    "nano":   TOL_ROSE,
+    "micro":  TOL_GOLD,
+    "mini":   TOL_TEAL,
+    "small":  WONG_SKYBLUE,
+    "medium": WONG_VERMILLION,
+    "large":  WONG_GREEN,
+}
+NSP_LABELS = {
+    "nano":   "NSP 2M",
+    "micro":  "NSP 6M",
+    "mini":   "NSP 14M",
+    "small":  "NSP 63M",
+    "medium": "NSP 115M",
+    "large":  "NSP 215M",
+}
 
 VQVAE_MARKERS = {"small": "o", "medium": "s", "large": "D"}
 VQVAE_LABELS = {"small": "VQ 31M", "medium": "VQ 57M", "large": "VQ 109M"}
 
-NSP_SIZES_ORDERED = ["small", "medium", "large"]
+NSP_SIZES_ORDERED = ["nano", "micro", "mini", "small", "medium", "large"]
 VQVAE_SIZES_ORDERED = ["small", "medium", "large"]
 SC_ORDERED = ["sc341", "sc917", "sc1941"]
 
@@ -402,6 +428,11 @@ def main():
     parser.add_argument("--output_dir", default="plots/scaling")
     parser.add_argument("--vqvae", type=str, default=None,
                         help="Filter to VQ-VAE size (small, medium, large)")
+    parser.add_argument("--sc", type=str, default=None, nargs="+",
+                        choices=list(SC_ORDERED),
+                        help="Filter to one or more sc configs (default: all). "
+                             "When exactly one sc config is selected, "
+                             "vs_tokens plots are skipped (would be degenerate).")
     parser.add_argument("--sampling_rollout", action="store_true",
                         help="Use gust2-sampling (temperature sweep) for "
                              "rollout metrics; takes best T per metric.")
@@ -451,6 +482,18 @@ def main():
         single_step_rows = [r for r in single_step_rows if r["vqvae_size"] == args.vqvae]
         print(f"Filtered to vqvae={args.vqvae}")
 
+    if args.sc:
+        sc_filter = set(args.sc)
+        if rollout_rows is not None:
+            rollout_rows = [r for r in rollout_rows if r["sc_config"] in sc_filter]
+        per_temperature_runs = [
+            ([r for r in rows if r["sc_config"] in sc_filter], ts, fs)
+            for rows, ts, fs in per_temperature_runs
+        ]
+        single_step_rows = [r for r in single_step_rows if r["sc_config"] in sc_filter]
+        print(f"Filtered to sc={sorted(sc_filter)}")
+    skip_vs_tokens = args.sc is not None and len(args.sc) == 1
+
     if args.per_temperature:
         for rows, ts, fs in per_temperature_runs:
             print(f"\n--- Rollout plots for T{fs[2:]} ({len(rows)} experiments) ---")
@@ -458,10 +501,11 @@ def main():
                 rows,
                 os.path.join(args.output_dir, f"rollout_vs_params{fs}.png"),
                 title=f"Rollout Scaling vs Total Parameters{ts}")
-            fig_vs_tokens(
-                rows,
-                os.path.join(args.output_dir, f"rollout_vs_tokens{fs}.png"),
-                title=f"Rollout Scaling vs Sequence Length{ts}")
+            if not skip_vs_tokens:
+                fig_vs_tokens(
+                    rows,
+                    os.path.join(args.output_dir, f"rollout_vs_tokens{fs}.png"),
+                    title=f"Rollout Scaling vs Sequence Length{ts}")
     else:
         print("\n--- Figure 1: rollout metric vs total params ---")
         fig_vs_total_params(
@@ -469,21 +513,23 @@ def main():
             os.path.join(args.output_dir, f"rollout_vs_params{rollout_file_suffix}.png"),
             title=f"Rollout Scaling vs Total Parameters{rollout_title_suffix}")
 
-        print("\n--- Figure 2: rollout metric vs tokens/sample ---")
-        fig_vs_tokens(
-            rollout_rows,
-            os.path.join(args.output_dir, f"rollout_vs_tokens{rollout_file_suffix}.png"),
-            title=f"Rollout Scaling vs Sequence Length{rollout_title_suffix}")
+        if not skip_vs_tokens:
+            print("\n--- Figure 2: rollout metric vs tokens/sample ---")
+            fig_vs_tokens(
+                rollout_rows,
+                os.path.join(args.output_dir, f"rollout_vs_tokens{rollout_file_suffix}.png"),
+                title=f"Rollout Scaling vs Sequence Length{rollout_title_suffix}")
 
     print("\n--- Figure 3: single-step metric vs total params ---")
     fig_vs_total_params(single_step_rows,
                         os.path.join(args.output_dir, "single_step_vs_params.png"),
                         title="Single-Step Scaling vs Total Parameters")
 
-    print("\n--- Figure 4: single-step metric vs tokens/sample ---")
-    fig_vs_tokens(single_step_rows,
-                  os.path.join(args.output_dir, "single_step_vs_tokens.png"),
-                  title="Single-Step Scaling vs Sequence Length")
+    if not skip_vs_tokens:
+        print("\n--- Figure 4: single-step metric vs tokens/sample ---")
+        fig_vs_tokens(single_step_rows,
+                      os.path.join(args.output_dir, "single_step_vs_tokens.png"),
+                      title="Single-Step Scaling vs Sequence Length")
 
     print(f"\nAll plots saved to {args.output_dir}/")
 
