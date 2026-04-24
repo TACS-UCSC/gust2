@@ -140,11 +140,22 @@ def main():
     attn_bias = build_teacher_forced_mask(
         scales_t0, padded_t0, scales_t1, padded_t1)
 
-    # Validate start frame and n_steps
+    # Validate start frame and n_steps. When N > 1, we need room in the val
+    # window for N distinct start frames AND n_steps of GT per trajectory --
+    # so reserve (N-1) extra trailing frames to let starts spread out.
+    N = max(1, args.n_trajectories)
     max_steps = len(indices) - args.start_frame - 1
+    if N > 1:
+        max_steps -= (N - 1)
+    if max_steps < 1:
+        raise ValueError(
+            f"Val window too short for {N} trajectories of {args.n_steps} steps "
+            f"each. Val has {len(indices)} frames; needed {args.start_frame + N + 1}."
+        )
     if args.n_steps > max_steps:
         print(f"  Clamped n_steps from {args.n_steps} to {max_steps} "
-              f"({len(indices)} frames available)")
+              f"({len(indices)} val frames, N={N} trajectories, "
+              f"start_frame={args.start_frame})")
         args.n_steps = max_steps
     max_start = len(indices) - args.n_steps - 1
     if args.start_frame > max_start:
@@ -153,7 +164,6 @@ def main():
 
     # Build trajectory start frames: evenly spaced between args.start_frame and
     # max_start so every trajectory gets n_steps of GT to compare against.
-    N = max(1, args.n_trajectories)
     if N == 1:
         start_frames = np.array([args.start_frame], dtype=np.int64)
     else:
