@@ -196,8 +196,11 @@ def main():
     all_accuracies = []   # each entry: mean-over-trajectories accuracy dict
 
     # Per-trajectory step-key chains: (N, n_steps, 2).
-    traj_root_keys = jnp.array(trajectory_seeds).astype(jnp.uint32)
-    traj_root_keys = jax.vmap(lambda s: jax.random.PRNGKey(int(s)))(traj_root_keys)
+    # Build the N root keys in plain Python (seeds are concrete ints) — doing
+    # this inside jax.vmap would try to int() a BatchTracer and crash with a
+    # ConcretizationTypeError.
+    traj_root_keys = jnp.stack(
+        [jax.random.PRNGKey(int(s)) for s in trajectory_seeds])
     step_keys = jax.vmap(lambda k: jax.random.split(k, args.n_steps))(traj_root_keys)
     # shape (N, n_steps, 2)
 
