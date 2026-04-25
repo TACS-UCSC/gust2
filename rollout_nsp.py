@@ -43,20 +43,21 @@ def parse_args():
     parser.add_argument("--tokens_path", type=str, required=True,
                         help="Path to tokenized .npz (validation data)")
     parser.add_argument("--start_frame", type=int, default=0,
-                        help="Index of the first starting frame (t0). For "
-                             "--n_trajectories > 1, additional start frames "
-                             "are placed evenly between this and the latest "
-                             "valid start given --n_steps.")
+                        help="Index of the starting frame (t0). All "
+                             "trajectories share this same IC.")
     parser.add_argument("--n_steps", type=int, default=2000,
                         help="Number of autoregressive steps")
     parser.add_argument("--n_trajectories", type=int, default=1,
-                        help="Number of independent trajectories to roll out "
-                             "in parallel (default 1). Each trajectory uses "
-                             "a distinct (start_frame, seed) pair — start "
-                             "frames are evenly spaced across the valid "
-                             "window, seeds are seed, seed+1, .... Output "
-                             "rank changes to (N, n_steps+1, tokens_per_frame) "
-                             "when N > 1.")
+                        help="Number of trajectories to roll out in parallel "
+                             "(default 1). All trajectories share the same "
+                             "start frame; only the sampling seed varies "
+                             "(seeds = seed, seed+1, ..., seed+N-1). The "
+                             "rollout ensemble exposes sampling-noise variance "
+                             "at fixed IC -- the right measure for blowup "
+                             "(higher per-trajectory EMD vs GT pixel "
+                             "distribution = trajectory drifted off-manifold). "
+                             "Output rank changes to (N, n_steps+1, "
+                             "tokens_per_frame) when N > 1.")
     parser.add_argument("--output_dir", type=str, required=True,
                         help="Output directory")
     parser.add_argument("--seed", type=int, default=42)
@@ -140,37 +141,29 @@ def main():
     attn_bias = build_teacher_forced_mask(
         scales_t0, padded_t0, scales_t1, padded_t1)
 
-    # Validate start frame and n_steps. When N > 1, we need room in the val
-    # window for N distinct start frames AND n_steps of GT per trajectory --
-    # so reserve (N-1) extra trailing frames to let starts spread out.
+    # Validate start frame and n_steps. All trajectories share the same
+    # starting IC (args.start_frame); only the sampling seed varies. The
+    # rollout ensemble exposes sampling-noise variance at fixed IC, which
+    # is what we want for "blowup" measurement (EMD vs GT pixel distribution
+    # at the matching frames).
     N = max(1, args.n_trajectories)
     max_steps = len(indices) - args.start_frame - 1
-    if N > 1:
-        max_steps -= (N - 1)
     if max_steps < 1:
         raise ValueError(
-            f"Val window too short for {N} trajectories of {args.n_steps} steps "
-            f"each. Val has {len(indices)} frames; needed {args.start_frame + N + 1}."
+            f"Val window too short: {len(indices)} frames available, "
+            f"start_frame={args.start_frame} leaves {max_steps} GT steps."
         )
     if args.n_steps > max_steps:
         print(f"  Clamped n_steps from {args.n_steps} to {max_steps} "
-              f"({len(indices)} val frames, N={N} trajectories, "
-              f"start_frame={args.start_frame})")
+              f"({len(indices)} val frames, start_frame={args.start_frame})")
         args.n_steps = max_steps
     max_start = len(indices) - args.n_steps - 1
     if args.start_frame > max_start:
         args.start_frame = max(0, max_start)
         print(f"  Clamped start_frame to {args.start_frame}")
 
-    # Build trajectory start frames: evenly spaced between args.start_frame and
-    # max_start so every trajectory gets n_steps of GT to compare against.
-    if N == 1:
-        start_frames = np.array([args.start_frame], dtype=np.int64)
-    else:
-        start_frames = np.linspace(
-            args.start_frame, max_start, N, dtype=np.int64)
-    # Ensure distinct + valid
-    start_frames = np.clip(start_frames, 0, max_start).astype(np.int64)
+    # All trajectories share the same start frame; seeds vary per trajectory.
+    start_frames = np.full(N, args.start_frame, dtype=np.int64)
     trajectory_seeds = np.array(
         [args.seed + i for i in range(N)], dtype=np.int64)
 
