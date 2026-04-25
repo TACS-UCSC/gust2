@@ -342,8 +342,23 @@ def main():
     n_frames = rollout["n_steps"] + 1
     scales = rollout["scales"]
     new_to_old = rollout["new_to_old"]
+
+    # Detect rank: rank-3 = legacy single-trajectory, rank-4 = N-trajectory
+    # ensemble (all sharing the same start frame, varying only the sampling
+    # seed). Promote rank-3 to rank-4 (N=1) so the rest of the pipeline can
+    # treat both uniformly.
+    rollout_indices = np.asarray(rollout["rollout_indices"])
+    gt_indices_raw  = np.asarray(rollout["gt_indices"])
+    if rollout_indices.ndim == 3:
+        rollout_indices = rollout_indices[None]    # (1, T+1, tokens)
+        gt_indices_raw  = gt_indices_raw[None]
+    N = rollout_indices.shape[0]
+    # All trajectories share IC + GT (same start_frame), so all rows of
+    # gt_indices_raw are identical. Use the first row for VQ-VAE decoding.
+    gt_indices_shared = gt_indices_raw[0]
     print(f"  {n_frames} frames, scales={list(scales)}, "
-          f"start_frame={rollout['start_frame']}")
+          f"start_frame={rollout['start_frame']}, N={N} trajector"
+          f"{'y' if N == 1 else 'ies'}")
 
     # --- Load VQ-VAE ---
     print(f"Loading VQ-VAE from {args.vqvae_dir}...")
@@ -352,7 +367,7 @@ def main():
     codebook = ema_state.codebook
     print(f"  Codebook: {codebook.shape}")
 
-    # --- Load raw ground truth from HDF5 ---
+    # --- Load raw ground truth from HDF5 (single shared window) ---
     print(f"Loading raw GT from {args.data_path} "
           f"(frames {args.sample_start + rollout['start_frame']}"
           f"-{args.sample_start + rollout['start_frame'] + n_frames})...")
@@ -360,17 +375,23 @@ def main():
                          args.sample_start, rollout["start_frame"], n_frames)
     print(f"  Loaded {raw_gt.shape[0]} frames")
 
-    # --- Decode VQ-VAE reconstruction (gt tokens -> pixels) ---
+    # --- Decode VQ-VAE reconstruction (shared GT tokens -> pixels) ---
     print("Decoding VQ-VAE reconstructions...")
     vqvae_fields = decode_all_tokens(
-        rollout["gt_indices"], decoder, vq, codebook,
+        gt_indices_shared, decoder, vq, codebook,
         new_to_old, scales, args.batch_size)
 
-    # --- Decode NSP predictions (rollout tokens -> pixels) ---
-    print("Decoding NSP predictions...")
-    nsp_fields = decode_all_tokens(
-        rollout["rollout_indices"], decoder, vq, codebook,
-        new_to_old, scales, args.batch_size)
+    # --- Decode N NSP trajectories ---
+    print(f"Decoding {N} NSP rollout(s)...")
+    nsp_fields_per_traj = []
+    for i in range(N):
+        print(f"  trajectory {i+1}/{N}...")
+        nsp_i = decode_all_tokens(
+            rollout_indices[i], decoder, vq, codebook,
+            new_to_old, scales, args.batch_size)
+        nsp_fields_per_traj.append(nsp_i)
+    # Trajectory 0 is the "representative" used for snapshots and the
+    # primary nsp_* spectra plots; ensemble averages aggregate over all N.
 
     # --- Spectral analysis ---
     print("Computing spectra...")
@@ -378,54 +399,113 @@ def main():
     Kx, Ky, Ksq, k_centers, bin_masks = setup_spectral_analysis(H, W)
     n_bins = len(k_centers)
 
-    gt_tke = np.zeros(n_bins)
-    gt_ens = np.zeros(n_bins)
-    vqvae_tke = np.zeros(n_bins)
-    vqvae_ens = np.zeros(n_bins)
-    nsp_tke = np.zeros(n_bins)
-    nsp_ens = np.zeros(n_bins)
-
+    # GT and VQ-VAE spectra (single trajectory, time-averaged):
+    gt_tke = np.zeros(n_bins);     gt_ens = np.zeros(n_bins)
+    vqvae_tke = np.zeros(n_bins);  vqvae_ens = np.zeros(n_bins)
     for i in range(n_frames):
-        gt_field = raw_gt[i, 0]
-        vq_field = vqvae_fields[i, 0]
-        ns_field = nsp_fields[i, 0]
+        gt_tke += compute_tke_spectrum(raw_gt[i, 0], Kx, Ky, Ksq, bin_masks)
+        gt_ens += compute_enstrophy_spectrum(raw_gt[i, 0], bin_masks)
+        vqvae_tke += compute_tke_spectrum(vqvae_fields[i, 0], Kx, Ky, Ksq, bin_masks)
+        vqvae_ens += compute_enstrophy_spectrum(vqvae_fields[i, 0], bin_masks)
+    gt_tke /= n_frames;     gt_ens /= n_frames
+    vqvae_tke /= n_frames;  vqvae_ens /= n_frames
 
-        gt_tke += compute_tke_spectrum(gt_field, Kx, Ky, Ksq, bin_masks)
-        gt_ens += compute_enstrophy_spectrum(gt_field, bin_masks)
-        vqvae_tke += compute_tke_spectrum(vq_field, Kx, Ky, Ksq, bin_masks)
-        vqvae_ens += compute_enstrophy_spectrum(vq_field, bin_masks)
-        nsp_tke += compute_tke_spectrum(ns_field, Kx, Ky, Ksq, bin_masks)
-        nsp_ens += compute_enstrophy_spectrum(ns_field, bin_masks)
-
-        if (i + 1) % 500 == 0 or i == n_frames - 1:
-            print(f"  {i + 1}/{n_frames} frames")
-
-    gt_tke /= n_frames
-    gt_ens /= n_frames
-    vqvae_tke /= n_frames
-    vqvae_ens /= n_frames
-    nsp_tke /= n_frames
-    nsp_ens /= n_frames
+    # NSP spectra: per trajectory time-averaged, then mean across trajectories
+    # for the ensemble spectrum used in plots/RSE.
+    nsp_tke_per_traj = np.zeros((N, n_bins))
+    nsp_ens_per_traj = np.zeros((N, n_bins))
+    for j in range(N):
+        for i in range(n_frames):
+            nsp_tke_per_traj[j] += compute_tke_spectrum(
+                nsp_fields_per_traj[j][i, 0], Kx, Ky, Ksq, bin_masks)
+            nsp_ens_per_traj[j] += compute_enstrophy_spectrum(
+                nsp_fields_per_traj[j][i, 0], bin_masks)
+            if (i + 1) % 500 == 0 or i == n_frames - 1:
+                print(f"  traj {j+1}/{N} frame {i+1}/{n_frames}")
+        nsp_tke_per_traj[j] /= n_frames
+        nsp_ens_per_traj[j] /= n_frames
+    # Ensemble spectrum (mean of per-trajectory time-averaged spectra) is
+    # the right "expected" spectrum given the model's sampling distribution.
+    nsp_tke = nsp_tke_per_traj.mean(axis=0)
+    nsp_ens = nsp_ens_per_traj.mean(axis=0)
 
     # --- Pixel distributions ---
     print("Computing pixel distributions...")
     gt_pixels = raw_gt[:, 0].ravel()
     vqvae_pixels = vqvae_fields[:, 0].ravel()
-    nsp_pixels = nsp_fields[:, 0].ravel()
-    hist_data = compute_histograms(gt_pixels, vqvae_pixels, nsp_pixels)
+    # Per-trajectory NSP pixel pools (used for per-trajectory EMD).
+    nsp_pixels_per_traj = [
+        nsp_fields_per_traj[j][:, 0].ravel() for j in range(N)
+    ]
+    # Ensemble pool (concatenation of all N trajectories) -> the histogram
+    # shown in the pixel_histogram.png.
+    nsp_pixels_ensemble = np.concatenate(nsp_pixels_per_traj)
+    hist_data = compute_histograms(gt_pixels, vqvae_pixels, nsp_pixels_ensemble)
+
+    # --- Per-trajectory metrics ---
+    print("Computing per-trajectory metrics...")
+    tke_rse_vqvae = relative_spectral_error(vqvae_tke, gt_tke)
+    enstrophy_rse_vqvae = relative_spectral_error(vqvae_ens, gt_ens)
+    emd_vqvae = pixel_emd(vqvae_pixels, gt_pixels)
+
+    tke_rse_per_traj = np.array([
+        relative_spectral_error(nsp_tke_per_traj[j], gt_tke) for j in range(N)
+    ])
+    enstrophy_rse_per_traj = np.array([
+        relative_spectral_error(nsp_ens_per_traj[j], gt_ens) for j in range(N)
+    ])
+    emd_per_traj = np.array([
+        pixel_emd(nsp_pixels_per_traj[j], gt_pixels) for j in range(N)
+    ])
+
+    def agg(a):
+        return float(np.mean(a)), float(np.std(a)), float(np.max(a))
+
+    tke_rse_nsp_mean, tke_rse_nsp_std, tke_rse_nsp_max = agg(tke_rse_per_traj)
+    ens_rse_nsp_mean, ens_rse_nsp_std, ens_rse_nsp_max = agg(enstrophy_rse_per_traj)
+    emd_nsp_mean, emd_nsp_std, emd_nsp_max = agg(emd_per_traj)
+
+    # Collapse rate: fraction of trajectories whose pixel-distribution EMD
+    # vs GT exceeds 2x the VQ-VAE reconstruction's EMD floor. A "collapsed"
+    # trajectory has drifted twice as far from GT as the codebook itself
+    # does -- a clear off-manifold signal that doesn't depend on per-frame
+    # accuracy.
+    collapse_threshold = 2.0 * emd_vqvae
+    collapse_rate = float(np.mean(emd_per_traj > collapse_threshold))
 
     # --- Metrics ---
-    print("Computing metrics...")
+    print("Aggregating metrics...")
     metrics = {
         "n_frames": n_frames,
+        "n_trajectories": N,
         "scales": list(scales),
         "start_frame": rollout["start_frame"],
-        "tke_rse_vqvae": relative_spectral_error(vqvae_tke, gt_tke),
-        "tke_rse_nsp": relative_spectral_error(nsp_tke, gt_tke),
-        "enstrophy_rse_vqvae": relative_spectral_error(vqvae_ens, gt_ens),
-        "enstrophy_rse_nsp": relative_spectral_error(nsp_ens, gt_ens),
-        "emd_vqvae": pixel_emd(vqvae_pixels, gt_pixels),
-        "emd_nsp": pixel_emd(nsp_pixels, gt_pixels),
+        # VQ-VAE baseline (single trajectory by construction)
+        "tke_rse_vqvae": tke_rse_vqvae,
+        "enstrophy_rse_vqvae": enstrophy_rse_vqvae,
+        "emd_vqvae": emd_vqvae,
+        # NSP scalar fields default to ensemble means (preserves prior schema
+        # so plot_scaling.py + sc341/sc917-report keep working unchanged).
+        "tke_rse_nsp": tke_rse_nsp_mean,
+        "enstrophy_rse_nsp": ens_rse_nsp_mean,
+        "emd_nsp": emd_nsp_mean,
+        # New per-aggregation fields:
+        "tke_rse_nsp_mean": tke_rse_nsp_mean,
+        "tke_rse_nsp_std":  tke_rse_nsp_std,
+        "tke_rse_nsp_max":  tke_rse_nsp_max,
+        "enstrophy_rse_nsp_mean": ens_rse_nsp_mean,
+        "enstrophy_rse_nsp_std":  ens_rse_nsp_std,
+        "enstrophy_rse_nsp_max":  ens_rse_nsp_max,
+        "emd_nsp_mean": emd_nsp_mean,
+        "emd_nsp_std":  emd_nsp_std,
+        "emd_nsp_max":  emd_nsp_max,
+        # Per-trajectory (length N) for downstream histogramming/plots:
+        "tke_rse_nsp_per_traj":      tke_rse_per_traj.tolist(),
+        "enstrophy_rse_nsp_per_traj":enstrophy_rse_per_traj.tolist(),
+        "emd_nsp_per_traj":          emd_per_traj.tolist(),
+        # Off-manifold signal:
+        "collapse_threshold": collapse_threshold,
+        "collapse_rate":      collapse_rate,
     }
 
     # --- Save plot data (spectra + histograms) for later replotting ---
@@ -433,11 +513,16 @@ def main():
     np.savez_compressed(data_path,
         k_centers=k_centers,
         tke_gt=gt_tke, tke_vqvae=vqvae_tke, tke_nsp=nsp_tke,
+        tke_nsp_per_traj=nsp_tke_per_traj,
         enstrophy_gt=gt_ens, enstrophy_vqvae=vqvae_ens, enstrophy_nsp=nsp_ens,
+        enstrophy_nsp_per_traj=nsp_ens_per_traj,
         hist_bin_centers=hist_data["bin_centers"],
         hist_gt=hist_data["gt_hist"],
         hist_vqvae=hist_data["vqvae_hist"],
         hist_nsp=hist_data["nsp_hist"],
+        emd_nsp_per_traj=emd_per_traj,
+        tke_rse_nsp_per_traj=tke_rse_per_traj,
+        enstrophy_rse_nsp_per_traj=enstrophy_rse_per_traj,
     )
     print(f"  Saved plot data to {data_path}")
 
@@ -453,7 +538,8 @@ def main():
     hist_fig = plot_histogram(
         hist_data, os.path.join(args.output_dir, "pixel_histogram.png"))
 
-    # --- Snapshot PNGs ---
+    # --- Snapshot PNGs (representative trajectory = trajectory 0) ---
+    nsp_fields_repr = nsp_fields_per_traj[0]
     snapshot_times = [1, 2, 5, 10, 50, 100, 250, 500, 1000, 1500, 2000]
     snapshot_dir = os.path.join(args.output_dir, "snapshots")
     os.makedirs(snapshot_dir, exist_ok=True)
@@ -462,7 +548,7 @@ def main():
         if t >= n_frames:
             continue
         fig = plot_snapshot(
-            raw_gt[t, 0], vqvae_fields[t, 0], nsp_fields[t, 0], t)
+            raw_gt[t, 0], vqvae_fields[t, 0], nsp_fields_repr[t, 0], t)
         out = os.path.join(snapshot_dir, f"t{t:04d}.png")
         # Rely on constrained_layout (set inside plot_snapshot) — do NOT pass
         # bbox_inches='tight', or the shared colorbar gets squished onto the
@@ -489,6 +575,7 @@ def main():
                 "rollout_dir": args.rollout_dir,
                 "vqvae_dir": args.vqvae_dir,
                 "n_frames": n_frames,
+                "n_trajectories": N,
                 "scales": list(scales),
             },
         )
@@ -496,17 +583,28 @@ def main():
             wandb_kwargs["group"] = args.wandb_group
         wandb.init(**wandb_kwargs)
         log_dict = {
+            # Scalar fields (mean over trajectories) preserved for backcompat.
             "tke_rse/vqvae": metrics["tke_rse_vqvae"],
-            "tke_rse/nsp": metrics["tke_rse_nsp"],
+            "tke_rse/nsp":   metrics["tke_rse_nsp"],
             "enstrophy_rse/vqvae": metrics["enstrophy_rse_vqvae"],
-            "enstrophy_rse/nsp": metrics["enstrophy_rse_nsp"],
+            "enstrophy_rse/nsp":   metrics["enstrophy_rse_nsp"],
             "emd/vqvae": metrics["emd_vqvae"],
-            "emd/nsp": metrics["emd_nsp"],
+            "emd/nsp":   metrics["emd_nsp"],
+            # New aggregation fields:
+            "tke_rse/nsp_std": tke_rse_nsp_std,
+            "tke_rse/nsp_max": tke_rse_nsp_max,
+            "enstrophy_rse/nsp_std": ens_rse_nsp_std,
+            "enstrophy_rse/nsp_max": ens_rse_nsp_max,
+            "emd/nsp_std": emd_nsp_std,
+            "emd/nsp_max": emd_nsp_max,
+            "collapse_rate": collapse_rate,
+            "collapse_threshold": collapse_threshold,
+            "n_trajectories": N,
+            # Plots:
             "tke_spectrum": wandb.Image(tke_fig),
             "enstrophy_spectrum": wandb.Image(ens_fig),
             "pixel_histogram": wandb.Image(hist_fig),
         }
-
         for t, snap_fig in snapshot_figs.items():
             log_dict[f"snapshot/t{t}"] = wandb.Image(snap_fig)
 
@@ -517,13 +615,18 @@ def main():
     plt.close("all")
 
     # --- Summary ---
-    print(f"\nResults ({n_frames} frames):")
-    print(f"  TKE RSE:       VQ-VAE={metrics['tke_rse_vqvae']:.4f}  "
-          f"NSP={metrics['tke_rse_nsp']:.4f}")
-    print(f"  Enstrophy RSE: VQ-VAE={metrics['enstrophy_rse_vqvae']:.4f}  "
-          f"NSP={metrics['enstrophy_rse_nsp']:.4f}")
-    print(f"  Pixel EMD:     VQ-VAE={metrics['emd_vqvae']:.6f}  "
-          f"NSP={metrics['emd_nsp']:.6f}")
+    print(f"\nResults ({n_frames} frames, {N} trajector{'y' if N==1 else 'ies'}):")
+    print(f"  TKE RSE:       VQ-VAE={tke_rse_vqvae:.4f}   "
+          f"NSP={tke_rse_nsp_mean:.4f} +/- {tke_rse_nsp_std:.4f}  "
+          f"(max {tke_rse_nsp_max:.4f})")
+    print(f"  Enstrophy RSE: VQ-VAE={enstrophy_rse_vqvae:.4f}   "
+          f"NSP={ens_rse_nsp_mean:.4f} +/- {ens_rse_nsp_std:.4f}  "
+          f"(max {ens_rse_nsp_max:.4f})")
+    print(f"  Pixel EMD:     VQ-VAE={emd_vqvae:.6f}  "
+          f"NSP={emd_nsp_mean:.6f} +/- {emd_nsp_std:.6f}  "
+          f"(max {emd_nsp_max:.6f})")
+    print(f"  Collapse rate (EMD > 2x VQ-VAE EMD = {collapse_threshold:.6f}): "
+          f"{collapse_rate*100:.1f}% of trajectories")
 
 
 if __name__ == "__main__":
