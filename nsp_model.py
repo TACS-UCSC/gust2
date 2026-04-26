@@ -551,7 +551,9 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
                       attn_bias: jax.Array, scale_masks: jax.Array,
                       trainable_indices: list,
                       key: jax.Array,
-                      temperature: float = 0.0) -> jax.Array:
+                      temperature: float = 0.0,
+                      top_k: int = 0,
+                      top_p: float = 1.0) -> jax.Array:
     """Generate a full t1 frame from t0, scale by scale.
 
     Runs one forward pass per trainable scale. Each scale k is predicted
@@ -560,7 +562,12 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
 
     Decoding:
         temperature == 0.0 -> greedy argmax (deterministic, key unused)
-        temperature > 0.0  -> ancestral sampling from softmax(logits / T)
+        temperature > 0.0  -> ancestral sampling from softmax(logits / T),
+            optionally with top-k and/or top-p (nucleus) truncation applied
+            to the per-token logits before the categorical draw.
+
+    top_k and top_p are captured as Python values at trace time so the
+    truncation branches resolve statically.
 
     Args:
         model, exp_heads: in inference mode
@@ -573,6 +580,8 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
         trainable_indices: list of trainable scale indices
         key: PRNGKey used for sampling (ignored when temperature == 0)
         temperature: sampling temperature; 0 disables sampling
+        top_k: keep only the top-k logits per token (0 disables)
+        top_p: nucleus threshold in (0, 1]; 1.0 disables
 
     Returns:
         (tokens_per_frame,) predicted t1 compact indices
@@ -656,6 +665,22 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
         if temperature == 0.0:
             predicted = jnp.argmax(logits, axis=-1)
         else:
+            if top_k > 0:
+                top_vals, _ = jax.lax.top_k(logits, top_k)
+                kth = top_vals[..., -1:]
+                logits = jnp.where(logits < kth, -1e9, logits)
+            if top_p < 1.0:
+                sorted_logits = jnp.sort(logits, axis=-1)[..., ::-1]
+                sorted_probs = jax.nn.softmax(
+                    sorted_logits / temperature, axis=-1)
+                cumprobs = jnp.cumsum(sorted_probs, axis=-1)
+                shifted = jnp.concatenate(
+                    [jnp.zeros_like(cumprobs[..., :1]),
+                     cumprobs[..., :-1]], axis=-1)
+                keep = shifted < top_p
+                kept = jnp.where(keep, sorted_logits, jnp.inf)
+                threshold = jnp.min(kept, axis=-1, keepdims=True)
+                logits = jnp.where(logits < threshold, -1e9, logits)
             predicted = jax.random.categorical(
                 scale_keys[i], logits / temperature, axis=-1)
 

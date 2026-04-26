@@ -63,6 +63,12 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--temperature", type=float, default=0.0,
                         help="Sampling temperature; 0 = greedy argmax")
+    parser.add_argument("--top_k", type=int, default=0,
+                        help="Top-k logit truncation per token (0 disables; "
+                             "ignored when temperature == 0).")
+    parser.add_argument("--top_p", type=float, default=1.0,
+                        help="Nucleus (top-p) threshold in (0, 1]; 1.0 "
+                             "disables (ignored when temperature == 0).")
     return parser.parse_args()
 
 
@@ -167,17 +173,20 @@ def main():
     trajectory_seeds = np.array(
         [args.seed + i for i in range(N)], dtype=np.int64)
 
-    # JIT the generation function (temperature captured as closure so the
-    # argmax-vs-sample Python branch resolves at trace time). vmap over the
-    # trajectory axis so a step advances all N trajectories in one forward.
+    # JIT the generation function (temperature/top_k/top_p captured as
+    # closures so the static Python branches resolve at trace time). vmap
+    # over the trajectory axis so a step advances all N trajectories in one
+    # forward.
     temperature = args.temperature
+    top_k = args.top_k
+    top_p = args.top_p
 
     def _generate_one(t0_tokens, key):
         return generate_t1_frame(
             model, exp_heads, config, t0_tokens,
             scales_t0, padded_t0, scales_t1, padded_t1,
             attn_bias, scale_masks, trainable_indices,
-            key, temperature,
+            key, temperature, top_k, top_p,
         )
 
     @jax.jit
@@ -186,7 +195,15 @@ def main():
         return jax.vmap(_generate_one)(t0_batch, keys_batch)
 
     # --- Rollout ---
-    decode_desc = "greedy" if temperature == 0.0 else f"T={temperature}"
+    if temperature == 0.0:
+        decode_desc = "greedy"
+    else:
+        parts = [f"T={temperature}"]
+        if top_k > 0:
+            parts.append(f"top_k={top_k}")
+        if top_p < 1.0:
+            parts.append(f"top_p={top_p}")
+        decode_desc = ",".join(parts)
     print(f"\nRolling out {args.n_steps} steps, {N} trajector"
           f"{'y' if N == 1 else 'ies'} "
           f"(start_frames={start_frames.tolist()}, seeds="
