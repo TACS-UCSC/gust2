@@ -18,7 +18,7 @@ from analyze_rollout import (
     load_raw_gt,
     load_rollout_data,
 )
-from train import load_checkpoint
+from tokenizer import load_checkpoint
 
 
 def main():
