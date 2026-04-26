@@ -343,13 +343,13 @@ def main():
     scales = rollout["scales"]
     new_to_old = rollout["new_to_old"]
 
-    # Detect rank: rank-3 = legacy single-trajectory, rank-4 = N-trajectory
-    # ensemble (all sharing the same start frame, varying only the sampling
-    # seed). Promote rank-3 to rank-4 (N=1) so the rest of the pipeline can
-    # treat both uniformly.
+    # Detect rank: rank-2 = legacy single-trajectory (T+1, tokens),
+    # rank-3 = N-trajectory ensemble (N, T+1, tokens), all sharing the same
+    # start frame and varying only the sampling seed. Promote rank-2 to
+    # rank-3 (N=1) so the rest of the pipeline can treat both uniformly.
     rollout_indices = np.asarray(rollout["rollout_indices"])
     gt_indices_raw  = np.asarray(rollout["gt_indices"])
-    if rollout_indices.ndim == 3:
+    if rollout_indices.ndim == 2:
         rollout_indices = rollout_indices[None]    # (1, T+1, tokens)
         gt_indices_raw  = gt_indices_raw[None]
     N = rollout_indices.shape[0]
