@@ -553,7 +553,8 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
                       key: jax.Array,
                       temperature: float = 0.0,
                       top_k: int = 0,
-                      top_p: float = 1.0) -> jax.Array:
+                      top_p: float = 1.0,
+                      log_topk: int = 0):
     """Generate a full t1 frame from t0, scale by scale.
 
     Runs one forward pass per trainable scale. Each scale k is predicted
@@ -566,8 +567,8 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
             optionally with top-k and/or top-p (nucleus) truncation applied
             to the per-token logits before the categorical draw.
 
-    top_k and top_p are captured as Python values at trace time so the
-    truncation branches resolve statically.
+    top_k, top_p and log_topk are captured as Python values at trace time
+    so the truncation/logging branches resolve statically.
 
     Args:
         model, exp_heads: in inference mode
@@ -582,9 +583,19 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
         temperature: sampling temperature; 0 disables sampling
         top_k: keep only the top-k logits per token (0 disables)
         top_p: nucleus threshold in (0, 1]; 1.0 disables
+        log_topk: if > 0, also return the top-K post-mask, pre-truncation
+            logits + their token indices for every emitted token. The
+            captured logits are the raw model output (after scale_mask
+            but before temperature scaling and top_k/top_p truncation),
+            so they reflect what the model believed before any sampling
+            intervention.
 
     Returns:
-        (tokens_per_frame,) predicted t1 compact indices
+        If log_topk == 0: (tokens_per_frame,) predicted t1 compact indices.
+        If log_topk  > 0: (predicted, top_logits, top_indices) where
+            top_logits / top_indices are (tokens_per_frame, log_topk)
+            float32/int32 arrays; deterministic-scale slots (below
+            trainable_indices[0]) are filled with zeros.
     """
     boundaries = config.scale_boundaries
     tokens_per_frame = config.tokens_per_frame
@@ -612,6 +623,12 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
         scale_keys = [None] * len(trainable_indices)
     else:
         scale_keys = list(jax.random.split(key, len(trainable_indices)))
+
+    if log_topk > 0:
+        top_logits_full = jnp.zeros(
+            (tokens_per_frame, log_topk), dtype=jnp.float32)
+        top_indices_full = jnp.zeros(
+            (tokens_per_frame, log_topk), dtype=jnp.int32)
 
     for i, scale_idx in enumerate(trainable_indices):
         h_k, w_k = config.scales[scale_idx]
@@ -662,6 +679,20 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
         local_coords = _local_cell_coords(h_k, w_k)
         logits = exp_heads.expand(h_flat, i, local_coords)
         logits = jnp.where(scale_masks[scale_idx][None, :], logits, -1e9)
+
+        # Capture pre-temperature, pre-truncation top-K logits & indices.
+        # Done *before* top_k/top_p modify logits so the snapshot reflects
+        # the model's raw next-token belief, not the sampler's truncated view.
+        if log_topk > 0:
+            tgt_start = boundaries[scale_idx]
+            top_vals_k, top_idx_k = jax.lax.top_k(logits, log_topk)
+            top_logits_full = jax.lax.dynamic_update_slice(
+                top_logits_full, top_vals_k.astype(jnp.float32),
+                (tgt_start, 0))
+            top_indices_full = jax.lax.dynamic_update_slice(
+                top_indices_full, top_idx_k.astype(jnp.int32),
+                (tgt_start, 0))
+
         if temperature == 0.0:
             predicted = jnp.argmax(logits, axis=-1)
         else:
@@ -688,6 +719,8 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
         tgt_end = boundaries[scale_idx + 1]
         t1_tokens = t1_tokens.at[tgt_start:tgt_end].set(predicted)
 
+    if log_topk > 0:
+        return t1_tokens, top_logits_full, top_indices_full
     return t1_tokens
 
 

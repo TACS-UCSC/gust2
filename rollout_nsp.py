@@ -69,6 +69,14 @@ def parse_args():
     parser.add_argument("--top_p", type=float, default=1.0,
                         help="Nucleus (top-p) threshold in (0, 1]; 1.0 "
                              "disables (ignored when temperature == 0).")
+    parser.add_argument("--log_topk", type=int, default=0,
+                        help="If > 0, also save per-emission top-K raw "
+                             "logits + token indices (post scale-mask, "
+                             "pre temperature/top_k/top_p) to "
+                             "rollout_logits.npz for offline diagnostics. "
+                             "Storage scales as N * n_steps * "
+                             "tokens_per_frame * log_topk * ~4 bytes "
+                             "(fp16 logits + int16 indices).")
     return parser.parse_args()
 
 
@@ -173,25 +181,28 @@ def main():
     trajectory_seeds = np.array(
         [args.seed + i for i in range(N)], dtype=np.int64)
 
-    # JIT the generation function (temperature/top_k/top_p captured as
-    # closures so the static Python branches resolve at trace time). vmap
-    # over the trajectory axis so a step advances all N trajectories in one
-    # forward.
+    # JIT the generation function (temperature/top_k/top_p/log_topk
+    # captured as closures so the static Python branches resolve at
+    # trace time). vmap over the trajectory axis so a step advances all
+    # N trajectories in one forward.
     temperature = args.temperature
     top_k = args.top_k
     top_p = args.top_p
+    log_topk = args.log_topk
 
     def _generate_one(t0_tokens, key):
         return generate_t1_frame(
             model, exp_heads, config, t0_tokens,
             scales_t0, padded_t0, scales_t1, padded_t1,
             attn_bias, scale_masks, trainable_indices,
-            key, temperature, top_k, top_p,
+            key, temperature, top_k, top_p, log_topk,
         )
 
     @jax.jit
     def generate_step_batched(t0_batch, keys_batch):
         # t0_batch: (N, tokens_per_frame);  keys_batch: (N, 2)
+        # Returns (N, tokens_per_frame) when log_topk == 0,
+        # else 3-tuple of (predicted, top_logits, top_indices).
         return jax.vmap(_generate_one)(t0_batch, keys_batch)
 
     # --- Rollout ---
@@ -215,6 +226,13 @@ def main():
     gt_tokens_list = [np.array(indices[start_frames])]
     all_accuracies = []   # each entry: mean-over-trajectories accuracy dict
 
+    # Per-step top-K logits + indices, if logging is enabled. Each entry is
+    # (N, tokens_per_frame, log_topk). The IC frame (step 0) has no logits
+    # (it was loaded from data, not predicted), so the saved arrays cover
+    # only the n_steps predicted frames.
+    logit_logits_per_step = [] if log_topk > 0 else None
+    logit_indices_per_step = [] if log_topk > 0 else None
+
     # Per-trajectory step-key chains: (N, n_steps, 2).
     # Build the N root keys in plain Python (seeds are concrete ints) — doing
     # this inside jax.vmap would try to int() a BatchTracer and crash with a
@@ -229,8 +247,19 @@ def main():
 
     for step in range(args.n_steps):
         keys_step = step_keys[:, step, :]     # (N, 2)
-        t1_batch = generate_step_batched(t0_batch, keys_step)   # (N, tokens_per_frame)
-        t1_batch.block_until_ready()
+        out = generate_step_batched(t0_batch, keys_step)
+        if log_topk > 0:
+            t1_batch, top_logits_step, top_indices_step = out
+            t1_batch.block_until_ready()
+            # Cast on-device to fp16 / int16 before host transfer to halve
+            # bandwidth + storage. effective_vocab_size <= 4096 fits int16.
+            top_logits_step = top_logits_step.astype(jnp.float16)
+            top_indices_step = top_indices_step.astype(jnp.int16)
+            logit_logits_per_step.append(np.array(top_logits_step))
+            logit_indices_per_step.append(np.array(top_indices_step))
+        else:
+            t1_batch = out
+            t1_batch.block_until_ready()
 
         # Accuracy per trajectory vs GT at (start_frame + step + 1).
         gt_indices_step = start_frames + step + 1
@@ -308,6 +337,33 @@ def main():
     tokens_path = os.path.join(args.output_dir, "rollout_tokens.npz")
     np.savez_compressed(tokens_path, **save_dict)
     print(f"  Tokens: {tokens_path} (shape {rollout_tokens.shape}, N={N})")
+
+    # --- Save per-emission top-K logits for offline diagnostics ---
+    if log_topk > 0:
+        # Stack along a step axis -> (N, n_steps, tokens_per_frame, log_topk)
+        top_logits_arr = np.stack(logit_logits_per_step, axis=1)
+        top_indices_arr = np.stack(logit_indices_per_step, axis=1)
+        if N == 1:
+            top_logits_arr = top_logits_arr[0]   # (n_steps, tok, K)
+            top_indices_arr = top_indices_arr[0]
+        logits_path = os.path.join(args.output_dir, "rollout_logits.npz")
+        np.savez_compressed(
+            logits_path,
+            top_logits=top_logits_arr,           # fp16
+            top_indices=top_indices_arr,         # int16
+            log_topk=np.int32(log_topk),
+            scales=np.array(scales_int),
+            first_trainable_scale=np.int32(
+                token_data.get("first_trainable_scale", 0)),
+            n_trajectories=int(N),
+            n_steps=args.n_steps,
+            start_frame=int(start_frames[0]),
+            trajectory_seeds=trajectory_seeds.astype(np.int64),
+            effective_vocab_size=token_data["effective_vocab_size"],
+        )
+        size_mb = os.path.getsize(logits_path) / (1024 ** 2)
+        print(f"  Logits: {logits_path} (shape {top_logits_arr.shape}, "
+              f"{size_mb:.1f} MB)")
 
     # --- Save metrics ---
     metrics = {
