@@ -77,6 +77,17 @@ def parse_args():
                              "Storage scales as N * n_steps * "
                              "tokens_per_frame * log_topk * ~4 bytes "
                              "(fp16 logits + int16 indices).")
+    parser.add_argument("--train_tokens_path", type=str, default=None,
+                        help="Path to training tokens .npz. When given, "
+                             "build a per-position vocabulary mask from "
+                             "training-set co-occurrences and AND it with "
+                             "the per-scale scale_masks at every emission. "
+                             "Restricts each position to tokens ever seen "
+                             "at that exact (scale, row, col) during "
+                             "training. Must come from the same VQ-VAE "
+                             "(same effective_vocab_size and new_to_old "
+                             "mapping) as --tokens_path. None disables "
+                             "(default; only per-scale masking applies).")
     return parser.parse_args()
 
 
@@ -112,6 +123,52 @@ def main():
     scales_int = token_data["scales"]
     scale_masks = jnp.array(token_data["scale_masks"])
     print(f"  {len(indices)} frames, {sum(s*s for s in scales_int)} tokens/frame")
+
+    # Optional: build per-position vocabulary mask from training tokens.
+    # The mask must come from the same VQ-VAE as the val tokens above.
+    position_mask_np = None
+    position_mask = None
+    if args.train_tokens_path is not None:
+        print(f"Loading training tokens for per-position mask: "
+              f"{args.train_tokens_path}")
+        train_npz = np.load(args.train_tokens_path)
+        train_idx = train_npz["indices_flat"]
+        V_train = int(train_npz["effective_vocab_size"])
+        V_val = int(token_data["effective_vocab_size"])
+        if V_train != V_val:
+            raise SystemExit(
+                f"VQ-VAE mismatch: train tokens have V={V_train} but val "
+                f"tokens have V={V_val}; use train tokens from the same "
+                f"VQ-VAE as --tokens_path.")
+        if not np.array_equal(train_npz["new_to_old"],
+                              token_data["new_to_old"]):
+            raise SystemExit(
+                "VQ-VAE compact-vocab mapping (new_to_old) differs "
+                "between train and val tokens; can't build a position "
+                "mask in a consistent vocab space.")
+        F_t, P_t = train_idx.shape
+        if P_t != sum(s * s for s in scales_int):
+            raise SystemExit(
+                f"Train tokens have P={P_t} positions but val expects "
+                f"{sum(s * s for s in scales_int)}.")
+        # (P, V) bool: M[p, v] = 1 iff token v appears at position p in train.
+        M = np.zeros((P_t, V_train), dtype=bool)
+        flat_p = np.broadcast_to(np.arange(P_t), (F_t, P_t)).ravel()
+        flat_v = train_idx.ravel().astype(np.int64)
+        M[flat_p, flat_v] = True
+        per_pos_count = M.sum(axis=1)
+        print(f"  Built position mask: {F_t} train frames, "
+              f"per-pos vocab min/med/max = "
+              f"{per_pos_count.min()}/{int(np.median(per_pos_count))}/"
+              f"{per_pos_count.max()}")
+        # Sanity: zero positions allowed -> sampling will fail. Should not
+        # happen for any position observed in training.
+        if per_pos_count.min() == 0:
+            raise SystemExit(
+                f"Position mask has {(per_pos_count == 0).sum()} positions "
+                f"with zero allowed tokens; can't sample.")
+        position_mask_np = M
+        position_mask = jnp.array(M)
 
     # Load model config from checkpoint
     state_path = os.path.join(args.checkpoint_dir, "training_state.json")
@@ -196,6 +253,7 @@ def main():
             scales_t0, padded_t0, scales_t1, padded_t1,
             attn_bias, scale_masks, trainable_indices,
             key, temperature, top_k, top_p, log_topk,
+            position_mask=position_mask,
         )
 
     @jax.jit
@@ -215,6 +273,8 @@ def main():
         if top_p < 1.0:
             parts.append(f"top_p={top_p}")
         decode_desc = ",".join(parts)
+    if position_mask is not None:
+        decode_desc += ",pos_mask"
     print(f"\nRolling out {args.n_steps} steps, {N} trajector"
           f"{'y' if N == 1 else 'ies'} "
           f"(start_frames={start_frames.tolist()}, seeds="
@@ -320,7 +380,10 @@ def main():
         "codebook_dim": token_data["codebook_dim"],
         "new_to_old": token_data["new_to_old"],
         "scale_masks": np.array(token_data["scale_masks"]),
+        "position_mask_used": bool(position_mask_np is not None),
     }
+    if position_mask_np is not None:
+        save_dict["train_tokens_path"] = str(args.train_tokens_path)
 
     # Per-scale indices: only saved for the N=1 (backward-compat) case.
     # At N>1 these fields would triple the npz size without being consumed by

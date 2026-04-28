@@ -554,7 +554,8 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
                       temperature: float = 0.0,
                       top_k: int = 0,
                       top_p: float = 1.0,
-                      log_topk: int = 0):
+                      log_topk: int = 0,
+                      position_mask: jax.Array = None):
     """Generate a full t1 frame from t0, scale by scale.
 
     Runs one forward pass per trainable scale. Each scale k is predicted
@@ -586,9 +587,14 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
         log_topk: if > 0, also return the top-K post-mask, pre-truncation
             logits + their token indices for every emitted token. The
             captured logits are the raw model output (after scale_mask
-            but before temperature scaling and top_k/top_p truncation),
-            so they reflect what the model believed before any sampling
-            intervention.
+            and position_mask if given, but before temperature scaling
+            and top_k/top_p truncation), so they reflect what the model
+            believed before any sampling intervention.
+        position_mask: optional (tokens_per_frame, effective_vocab) bool.
+            If given, ANDs with scale_masks per emitted token, restricting
+            each position to tokens ever seen at that exact (scale, row,
+            col) during training. None disables (default; only scale_mask
+            applies, matching original behavior).
 
     Returns:
         If log_topk == 0: (tokens_per_frame,) predicted t1 compact indices.
@@ -679,6 +685,12 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
         local_coords = _local_cell_coords(h_k, w_k)
         logits = exp_heads.expand(h_flat, i, local_coords)
         logits = jnp.where(scale_masks[scale_idx][None, :], logits, -1e9)
+
+        if position_mask is not None:
+            tgt_start_pm = boundaries[scale_idx]
+            tgt_end_pm = boundaries[scale_idx + 1]
+            pm_slice = position_mask[tgt_start_pm:tgt_end_pm, :]
+            logits = jnp.where(pm_slice, logits, -1e9)
 
         # Capture pre-temperature, pre-truncation top-K logits & indices.
         # Done *before* top_k/top_p modify logits so the snapshot reflects
