@@ -72,8 +72,28 @@ def parse_args():
                         help="Warmup steps (default: min(1000, total//10))")
     parser.add_argument("--max_samples", type=int, default=None,
                         help="Use only first N frames (default: all)")
-    parser.add_argument("--context_drop_rate", type=float, default=0.0,
-                        help="Per-token dropout rate for context (t0 + t1 coarser)")
+    parser.add_argument("--train_tokens_path", type=str, default=None,
+                        help="Path to training tokens .npz used to build a "
+                             "per-position vocabulary mask. When provided, "
+                             "the loss masks logits with the per-position "
+                             "mask (replacing the per-scale mask) and the "
+                             "same membership matrix is used as the legal "
+                             "pool for --substitution_rate noise. Must come "
+                             "from the same VQ-VAE as --tokens_path "
+                             "(matching effective_vocab_size and "
+                             "new_to_old). Typically equal to --tokens_path "
+                             "for self-trained NSP, but kept as a separate "
+                             "flag so the membership matrix and the train "
+                             "split can be decoupled.")
+    parser.add_argument("--substitution_rate", type=float, default=0.0,
+                        help="Per-token Bernoulli rate of replacing input "
+                             "tokens with a uniformly-drawn legal token at "
+                             "the same position, applied independently to "
+                             "t0 and t1-truncated. Requires "
+                             "--train_tokens_path. The supervision target "
+                             "is unchanged (true t1), so this is a "
+                             "denoising objective that exposes the model "
+                             "to its own rollout-time error distribution.")
     # Checkpointing
     parser.add_argument("--checkpoint_dir", type=str, default="./checkpoints_nsp")
     parser.add_argument("--save_every", type=int, default=10,
@@ -145,8 +165,25 @@ def _cast_to_half(x):
 def make_compute_loss(config, scales_t0, padded_len_t0,
                       scales_t1, padded_len_t1,
                       attn_bias, scale_weights, trainable_indices,
-                      scale_masks, context_drop_rate=0.0):
+                      scale_masks,
+                      position_mask=None,
+                      legal_indices=None,
+                      per_pos_count=None,
+                      substitution_rate=0.0):
     """Build the loss function capturing static config.
+
+    When position_mask is provided, the per-scale logit mask is replaced
+    by a per-position mask of shape (tokens_per_frame, effective_vocab),
+    sliced per scale inside the loop. This calibrates training under the
+    same constraint enforced at rollout (rollout_nsp.py + per-position
+    masking).
+
+    When substitution_rate > 0 and legal_indices/per_pos_count are
+    provided, each input token is independently replaced (with that
+    Bernoulli rate) by a uniformly-drawn legal token at the same
+    position. Applied to t0 (all 5 scales) and t1-truncated (4 scales)
+    independently; supervision target is unchanged. Replaces the prior
+    zero-token context dropout.
 
     Returns: (model, exp_heads, batch_tokens, key) -> (loss, metrics)
     """
@@ -168,8 +205,10 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
     # Total tokens in truncated t1
     tokens_t1_trunc = sum(h * w for h, w in scales_t1)
 
-    # Total sequence length (for dropout mask)
-    seq_len = padded_len_t0 + padded_len_t1
+    use_pos_mask = position_mask is not None
+    use_substitution = (substitution_rate > 0.0
+                        and legal_indices is not None
+                        and per_pos_count is not None)
 
     def compute_loss(model, exp_heads, batch_tokens, key):
         B = batch_tokens.shape[0]
@@ -188,22 +227,48 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
                          ((0, 0), (0, padded_len_t1 - tokens_t1_trunc)))
         tokens_in = jnp.concatenate([t0_pad, t1_pad], axis=1)
 
-        # Forward pass via vmap. Dropout mask is derived per-sample
-        # inside the mapped function (via axis_index + fold_in) so the
-        # mapped inputs all share the same sharding spec.
+        # Forward pass via vmap. Substitution noise (if enabled) is
+        # derived per-sample inside the mapped function so the mapped
+        # inputs all share the same sharding spec.
         def per_sample_forward(t):
-            if context_drop_rate > 0:
+            if use_substitution:
+                # Per-sample key by folding in batch axis index.
                 k = jax.random.fold_in(key, jax.lax.axis_index('batch'))
-                drop_mask = jax.random.bernoulli(
-                    k, 1.0 - context_drop_rate, shape=(seq_len,)
-                ).astype(jnp.float32)
-            else:
-                drop_mask = None
+                k_b0, k_r0, k_b1, k_r1 = jax.random.split(k, 4)
+                # t0 portion: positions [0:tokens_per_frame] of t.
+                sub0 = jax.random.bernoulli(
+                    k_b0, substitution_rate, shape=(tokens_per_frame,))
+                idx0 = jax.random.randint(
+                    k_r0, (tokens_per_frame,),
+                    jnp.zeros((tokens_per_frame,), dtype=jnp.int32),
+                    per_pos_count)
+                rep0 = legal_indices[jnp.arange(tokens_per_frame), idx0]
+                t0_orig = t[:tokens_per_frame]
+                t0_new = jnp.where(sub0, rep0, t0_orig)
+                # t1-truncated portion: positions [padded_len_t0 :
+                # padded_len_t0 + tokens_t1_trunc] of t. The first
+                # tokens_t1_trunc positions of the per-position arrays
+                # apply because t1's input layout is a prefix of t0's
+                # (scales 1, 2, 4, 8 in order).
+                sub1 = jax.random.bernoulli(
+                    k_b1, substitution_rate, shape=(tokens_t1_trunc,))
+                idx1 = jax.random.randint(
+                    k_r1, (tokens_t1_trunc,),
+                    jnp.zeros((tokens_t1_trunc,), dtype=jnp.int32),
+                    per_pos_count[:tokens_t1_trunc])
+                rep1 = legal_indices[jnp.arange(tokens_t1_trunc), idx1]
+                t1_orig = jax.lax.dynamic_slice(
+                    t, (padded_len_t0,), (tokens_t1_trunc,))
+                t1_new = jnp.where(sub1, rep1, t1_orig)
+                # Splice both back into t.
+                t = jax.lax.dynamic_update_slice(t, t0_new, (0,))
+                t = jax.lax.dynamic_update_slice(
+                    t, t1_new, (padded_len_t0,))
             return forward_teacher_forced(
                 model, t, config,
                 scales_t0, padded_len_t0,
                 scales_t1, padded_len_t1,
-                attn_bias, drop_mask=drop_mask,
+                attn_bias,
             )
 
         hidden = jax.vmap(per_sample_forward, axis_name='batch')(tokens_in)
@@ -260,13 +325,20 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
             )(h_flat)
             # (B, n_tokens_k, effective_vocab)
 
-            # Apply scale mask: set invalid tokens to -1e9
-            mask_k = scale_masks[scale_idx]  # (effective_vocab,) bool
-            logits = jnp.where(mask_k[None, None, :], logits, -1e9)
-
-            # Targets from full t1 (compact indices, no offset needed)
+            # Mask invalid tokens to -1e9. When position_mask is
+            # available, slice it per scale and use it directly (it is
+            # a strict subset of scale_masks so AND-ing is unnecessary).
             tgt_start = boundaries_full[scale_idx]
             tgt_end = boundaries_full[scale_idx + 1]
+            if use_pos_mask:
+                pm_slice = position_mask[tgt_start:tgt_end, :]
+                logits = jnp.where(pm_slice[None, :, :], logits, -1e9)
+            else:
+                mask_k = scale_masks[scale_idx]  # (effective_vocab,) bool
+                logits = jnp.where(mask_k[None, None, :], logits, -1e9)
+
+            # Targets from full t1 (compact indices, no offset needed)
+            # tgt_start / tgt_end already computed above for masking.
             targets = t1_full[:, tgt_start:tgt_end]
 
             # Cross-entropy
@@ -397,6 +469,73 @@ def main():
     print(f"Loaded {len(indices)} frames, {tokens_per_frame} tokens/frame")
     print(f"Scales: {list(scales_int)}")
 
+    # Optional: build per-position vocabulary mask + uniform-substitution
+    # legal-token table from a training tokens npz. When provided, this
+    # both (a) replaces the per-scale mask in the loss and (b) supplies
+    # the legal pool for --substitution_rate noise. The npz must come
+    # from the same VQ-VAE as --tokens_path (matching effective_vocab and
+    # new_to_old).
+    position_mask_jnp = None
+    legal_indices_jnp = None
+    per_pos_count_jnp = None
+    if args.train_tokens_path is not None:
+        print(f"Loading training tokens for per-position mask: "
+              f"{args.train_tokens_path}")
+        train_npz = np.load(args.train_tokens_path)
+        train_idx = train_npz["indices_flat"]
+        V_train = int(train_npz["effective_vocab_size"])
+        V_main = int(token_data["effective_vocab_size"])
+        if V_train != V_main:
+            raise SystemExit(
+                f"VQ-VAE mismatch: --train_tokens_path has V={V_train} "
+                f"but --tokens_path has V={V_main}; both must come from "
+                f"the same VQ-VAE.")
+        if not np.array_equal(train_npz["new_to_old"],
+                              token_data["new_to_old"]):
+            raise SystemExit(
+                "VQ-VAE compact-vocab mapping (new_to_old) differs "
+                "between --train_tokens_path and --tokens_path; can't "
+                "build a position mask in a consistent vocab space.")
+        F_t, P_t = train_idx.shape
+        if P_t != tokens_per_frame:
+            raise SystemExit(
+                f"Train tokens have P={P_t} positions but the model "
+                f"expects {tokens_per_frame}.")
+
+        # M[p, v] = True iff token v appears at position p in training.
+        M = np.zeros((P_t, V_train), dtype=bool)
+        flat_p = np.broadcast_to(np.arange(P_t), (F_t, P_t)).ravel()
+        flat_v = train_idx.ravel().astype(np.int64)
+        M[flat_p, flat_v] = True
+        per_pos_count = M.sum(axis=1).astype(np.int32)
+        if per_pos_count.min() < 1:
+            raise SystemExit(
+                f"Position mask has {(per_pos_count == 0).sum()} positions "
+                f"with zero allowed tokens; can't build substitution table.")
+        max_per_pos = int(per_pos_count.max())
+
+        # legal_indices[p, k] = the k-th legal token id at position p
+        # (for k < per_pos_count[p]); padding beyond is 0 and gated by
+        # per_pos_count[p] at sample time.
+        legal_indices = np.zeros((P_t, max_per_pos), dtype=np.int32)
+        for p in range(P_t):
+            tokens_p = np.flatnonzero(M[p])
+            legal_indices[p, :tokens_p.size] = tokens_p
+        print(f"  Built position mask: {F_t} train frames, "
+              f"per-pos vocab min/med/max = "
+              f"{per_pos_count.min()}/{int(np.median(per_pos_count))}/"
+              f"{per_pos_count.max()}")
+        print(f"  legal_indices shape: {legal_indices.shape} "
+              f"(~{legal_indices.nbytes / 1e6:.1f} MB)")
+
+        position_mask_jnp = jnp.array(M)
+        legal_indices_jnp = jnp.array(legal_indices)
+        per_pos_count_jnp = jnp.array(per_pos_count)
+    elif args.substitution_rate > 0.0:
+        raise SystemExit(
+            "--substitution_rate > 0 requires --train_tokens_path "
+            "(needed to build the per-position legal-token pool).")
+
     # Setup config
     config = NSPConfig(
         n_layer=args.n_layer,
@@ -466,7 +605,11 @@ def main():
         config, scales_t0, padded_len_t0,
         scales_t1, padded_len_t1,
         attn_bias, scale_weights, trainable_indices,
-        scale_masks, context_drop_rate=args.context_drop_rate,
+        scale_masks,
+        position_mask=position_mask_jnp,
+        legal_indices=legal_indices_jnp,
+        per_pos_count=per_pos_count_jnp,
+        substitution_rate=args.substitution_rate,
     )
     train_step = make_train_step(compute_loss_fn)
 

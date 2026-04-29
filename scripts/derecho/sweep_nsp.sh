@@ -41,7 +41,6 @@ EPOCHS=400
 LR=1e-4
 WEIGHT_DECAY=1e-4
 GRAD_CLIP=1.0
-CONTEXT_DROP_RATE=0.25
 SAVE_EVERY=5
 SEED=42
 WANDB_PROJECT="gust2-nsp-derecho"
@@ -118,7 +117,7 @@ while [[ $# -gt 0 ]]; do
             echo "VQ-VAE token sources:"
             for v in "${VQVAE_NAMES[@]}"; do echo "  ${v}"; done
             echo ""
-            echo "Total: 3 × 9 = 27 jobs, ${EPOCHS} epochs, drop=${CONTEXT_DROP_RATE}"
+            echo "Total: 3 × 9 = 27 jobs, ${EPOCHS} epochs"
             echo "Walltime: 12h per job — resubmit to resume if not finished."
             exit 0
             ;;
@@ -315,7 +314,6 @@ python train_nsp.py \\
     --lr ${LR} \\
     --weight_decay ${WEIGHT_DECAY} \\
     --grad_clip ${GRAD_CLIP} \\
-    --context_drop_rate ${CONTEXT_DROP_RATE} \\
     --save_every ${SAVE_EVERY} \\
     --seed ${SEED} \\
     --checkpoint_dir "${CHECKPOINT_DIR}" \\
