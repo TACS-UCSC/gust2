@@ -236,13 +236,16 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
                 k = jax.random.fold_in(key, jax.lax.axis_index('batch'))
                 k_b0, k_r0, k_b1, k_r1 = jax.random.split(k, 4)
                 # t0 portion: positions [0:tokens_per_frame] of t.
+                # Use take_along_axis (single-axis gather) instead of
+                # fancy 2D indexing — the latter doesn't resolve under
+                # vmap + SPMD (JAX raises ShardingTypeError on the
+                # batched gather).
                 sub0 = jax.random.bernoulli(
                     k_b0, substitution_rate, shape=(tokens_per_frame,))
                 idx0 = jax.random.randint(
-                    k_r0, (tokens_per_frame,),
-                    jnp.zeros((tokens_per_frame,), dtype=jnp.int32),
-                    per_pos_count)
-                rep0 = legal_indices[jnp.arange(tokens_per_frame), idx0]
+                    k_r0, (tokens_per_frame,), 0, per_pos_count)
+                rep0 = jnp.take_along_axis(
+                    legal_indices, idx0[:, None], axis=1).squeeze(-1)
                 t0_orig = t[:tokens_per_frame]
                 t0_new = jnp.where(sub0, rep0, t0_orig)
                 # t1-truncated portion: positions [padded_len_t0 :
@@ -253,10 +256,11 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
                 sub1 = jax.random.bernoulli(
                     k_b1, substitution_rate, shape=(tokens_t1_trunc,))
                 idx1 = jax.random.randint(
-                    k_r1, (tokens_t1_trunc,),
-                    jnp.zeros((tokens_t1_trunc,), dtype=jnp.int32),
+                    k_r1, (tokens_t1_trunc,), 0,
                     per_pos_count[:tokens_t1_trunc])
-                rep1 = legal_indices[jnp.arange(tokens_t1_trunc), idx1]
+                rep1 = jnp.take_along_axis(
+                    legal_indices[:tokens_t1_trunc],
+                    idx1[:, None], axis=1).squeeze(-1)
                 t1_orig = jax.lax.dynamic_slice(
                     t, (padded_len_t0,), (tokens_t1_trunc,))
                 t1_new = jnp.where(sub1, rep1, t1_orig)
