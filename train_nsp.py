@@ -210,6 +210,16 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
                         and legal_indices is not None
                         and per_pos_count is not None)
 
+    if use_substitution:
+        # Precompute float32 view + t1-truncated slices once per
+        # closure build so the inner vmap below uses replicated
+        # closure constants without re-casting on every call.
+        legal_indices_f = legal_indices.astype(jnp.float32)
+        legal_indices_t1_f = legal_indices_f[:tokens_t1_trunc]
+        per_pos_count_t0 = per_pos_count
+        per_pos_count_t1 = per_pos_count[:tokens_t1_trunc]
+        max_per_pos = legal_indices.shape[1]
+
     def compute_loss(model, exp_heads, batch_tokens, key):
         B = batch_tokens.shape[0]
 
@@ -227,47 +237,62 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
                          ((0, 0), (0, padded_len_t1 - tokens_t1_trunc)))
         tokens_in = jnp.concatenate([t0_pad, t1_pad], axis=1)
 
-        # Forward pass via vmap. Substitution noise (if enabled) is
-        # derived per-sample inside the mapped function so the mapped
-        # inputs all share the same sharding spec.
+        # Apply same-position substitution at batch level (outside the
+        # main per-sample vmap). The replacement is computed via a
+        # one-hot * legal_indices einsum rather than fancy indexing,
+        # because under vmap+SPMD a batched gather can't have its
+        # output sharding inferred (JAX raises ShardingTypeError).
+        # The codebase already uses this idiom for codebook lookups
+        # (see CLAUDE.md: "One-hot matmul for codebook lookups —
+        # avoids fancy indexing for sharding safety").
+        if use_substitution:
+            k_b0, k_r0, k_b1, k_r1 = jax.random.split(key, 4)
+            # Random ops in Explicit-mesh mode produce replicated outputs
+            # by default. We need to constrain the random results to be
+            # batch-sharded so they can be combined with tokens_in
+            # (which is batch-sharded) via where/select.
+            batch_spec = P('batch', None)
+            # t0 portion (all 5 scales of the t0 input).
+            sub0_b = jax.random.bernoulli(
+                k_b0, substitution_rate,
+                shape=(B, tokens_per_frame))
+            sub0_b = jax.sharding.reshard(sub0_b, batch_spec)
+            idx0_b = jax.random.randint(
+                k_r0, (B, tokens_per_frame), 0, per_pos_count_t0)
+            idx0_b = jax.sharding.reshard(idx0_b, batch_spec)
+            one_hot0 = jax.nn.one_hot(
+                idx0_b, max_per_pos, dtype=jnp.float32)
+            # rep0_b[b, p] = legal_indices_f[p, idx0_b[b, p]] via batched
+            # einsum (one-hot * legal_indices), contraction over k.
+            # Output inherits batch sharding from one_hot0.
+            rep0_b = jnp.einsum(
+                'pk,bpk->bp', legal_indices_f, one_hot0
+            ).astype(jnp.int32)
+            # t1-truncated portion (4 scales: 1, 2, 4, 8).
+            sub1_b = jax.random.bernoulli(
+                k_b1, substitution_rate,
+                shape=(B, tokens_t1_trunc))
+            sub1_b = jax.sharding.reshard(sub1_b, batch_spec)
+            idx1_b = jax.random.randint(
+                k_r1, (B, tokens_t1_trunc), 0, per_pos_count_t1)
+            idx1_b = jax.sharding.reshard(idx1_b, batch_spec)
+            one_hot1 = jax.nn.one_hot(
+                idx1_b, max_per_pos, dtype=jnp.float32)
+            rep1_b = jnp.einsum(
+                'pk,bpk->bp', legal_indices_t1_f, one_hot1
+            ).astype(jnp.int32)
+            # Apply substitutions to tokens_in.
+            t0_in = tokens_in[:, :tokens_per_frame]
+            t0_new = jnp.where(sub0_b, rep0_b, t0_in)
+            tokens_in = tokens_in.at[:, :tokens_per_frame].set(t0_new)
+            t1_in = jax.lax.dynamic_slice(
+                tokens_in, (0, padded_len_t0), (B, tokens_t1_trunc))
+            t1_new = jnp.where(sub1_b, rep1_b, t1_in)
+            tokens_in = jax.lax.dynamic_update_slice(
+                tokens_in, t1_new, (0, padded_len_t0))
+
+        # Forward pass via vmap.
         def per_sample_forward(t):
-            if use_substitution:
-                # Per-sample key by folding in batch axis index.
-                k = jax.random.fold_in(key, jax.lax.axis_index('batch'))
-                k_b0, k_r0, k_b1, k_r1 = jax.random.split(k, 4)
-                # t0 portion: positions [0:tokens_per_frame] of t.
-                # Use take_along_axis (single-axis gather) instead of
-                # fancy 2D indexing — the latter doesn't resolve under
-                # vmap + SPMD (JAX raises ShardingTypeError on the
-                # batched gather).
-                sub0 = jax.random.bernoulli(
-                    k_b0, substitution_rate, shape=(tokens_per_frame,))
-                idx0 = jax.random.randint(
-                    k_r0, (tokens_per_frame,), 0, per_pos_count)
-                rep0 = jnp.take_along_axis(
-                    legal_indices, idx0[:, None], axis=1).squeeze(-1)
-                t0_orig = t[:tokens_per_frame]
-                t0_new = jnp.where(sub0, rep0, t0_orig)
-                # t1-truncated portion: positions [padded_len_t0 :
-                # padded_len_t0 + tokens_t1_trunc] of t. The first
-                # tokens_t1_trunc positions of the per-position arrays
-                # apply because t1's input layout is a prefix of t0's
-                # (scales 1, 2, 4, 8 in order).
-                sub1 = jax.random.bernoulli(
-                    k_b1, substitution_rate, shape=(tokens_t1_trunc,))
-                idx1 = jax.random.randint(
-                    k_r1, (tokens_t1_trunc,), 0,
-                    per_pos_count[:tokens_t1_trunc])
-                rep1 = jnp.take_along_axis(
-                    legal_indices[:tokens_t1_trunc],
-                    idx1[:, None], axis=1).squeeze(-1)
-                t1_orig = jax.lax.dynamic_slice(
-                    t, (padded_len_t0,), (tokens_t1_trunc,))
-                t1_new = jnp.where(sub1, rep1, t1_orig)
-                # Splice both back into t.
-                t = jax.lax.dynamic_update_slice(t, t0_new, (0,))
-                t = jax.lax.dynamic_update_slice(
-                    t, t1_new, (padded_len_t0,))
             return forward_teacher_forced(
                 model, t, config,
                 scales_t0, padded_len_t0,
