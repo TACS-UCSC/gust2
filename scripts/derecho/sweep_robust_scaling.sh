@@ -31,9 +31,9 @@ ACCOUNT="UCSC0009"
 
 # ---------- Shared training config ----------
 N_REFINE_LAYERS=2
-BATCH_SIZE=64
+BATCH_SIZE=128                    # 32/GPU × 4 GPUs — paired with linearly-scaled LR
 EPOCHS=400
-LR=1e-4
+LR=2e-4                           # linear-scaled with 2× batch vs validated 1e-4 @ 64
 WEIGHT_DECAY=1e-4
 GRAD_CLIP=1.0
 SAVE_EVERY=5
@@ -215,7 +215,7 @@ echo "Tokens:        ${TOKENS_PATH}"
 echo "Train tokens:  ${TRAIN_TOKENS}  (per-position mask + substitution pool)"
 echo "Substitution:  ${SUBSTITUTION_RATE}"
 echo "Ckpt dir:      ${CHECKPOINT_DIR}"
-echo "Batch:         ${BATCH_SIZE}  (16/GPU)"
+echo "Batch:         ${BATCH_SIZE}  (32/GPU)  LR=${LR}"
 echo "Wandb:         ${WANDB_PROJECT} / ${RUN_NAME}  (id=${WANDB_ID}, group=${WANDB_GROUP})"
 echo "Resume:        ${RESUME_FLAG:-no}"
 echo "=========================================="

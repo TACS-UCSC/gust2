@@ -34,9 +34,9 @@ ACCOUNT="mth260004p"
 
 # ---------- Shared training config ----------
 N_REFINE_LAYERS=2
-BATCH_SIZE=64                     # 16/GPU × 4 GPUs — matches Derecho's robust recipe
+BATCH_SIZE=128                    # 32/GPU × 4 H100-80 — fills the headroom
 EPOCHS=400
-LR=1e-4
+LR=2e-4                           # linear-scaled with 2× batch vs validated 1e-4 @ 64
 WEIGHT_DECAY=1e-4
 GRAD_CLIP=1.0
 SAVE_EVERY=5
@@ -111,7 +111,7 @@ while [[ $# -gt 0 ]]; do
             done
             echo ""
             echo "Robust knobs: substitution_rate=${SUBSTITUTION_RATE}, n_refine=${N_REFINE_LAYERS}"
-            echo "GPUs:         4× H100-80 per job, global batch=${BATCH_SIZE} (16/GPU)"
+            echo "GPUs:         4× H100-80 per job, global batch=${BATCH_SIZE} (32/GPU), LR=${LR}"
             echo "Walltime:     12h/job — resubmit to resume."
             exit 0
             ;;
@@ -150,7 +150,7 @@ echo "  Output base:      ${AR_BASE}"
 echo "  Wandb project:    ${WANDB_PROJECT}"
 echo "  Substitution rate:${SUBSTITUTION_RATE}"
 echo "  GPUs/job:         4× H100-80 (GPU-shared)"
-echo "  Global batch:     ${BATCH_SIZE} (16/GPU)"
+echo "  Global batch:     ${BATCH_SIZE} (32/GPU)  LR=${LR}"
 echo "  Walltime:         12h/job (resubmit to resume)"
 echo "  Dry run:          ${DRY_RUN}"
 echo "=========================================="
@@ -215,7 +215,7 @@ echo "Tokens:        ${TOKENS_PATH}"
 echo "Train tokens:  ${TRAIN_TOKENS}  (per-position mask + substitution pool)"
 echo "Substitution:  ${SUBSTITUTION_RATE}"
 echo "Ckpt dir:      ${CHECKPOINT_DIR}"
-echo "Batch:         ${BATCH_SIZE}  (16/GPU)"
+echo "Batch:         ${BATCH_SIZE}  (32/GPU)  LR=${LR}"
 echo "Wandb:         ${WANDB_PROJECT} / ${RUN_NAME}  (id=${WANDB_ID}, group=${WANDB_GROUP})"
 echo "Resume:        ${RESUME_FLAG:-no}"
 echo "=========================================="
