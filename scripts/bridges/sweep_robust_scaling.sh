@@ -14,10 +14,11 @@
 # the robust recipe validated on Derecho's 4× A100-40.
 #
 # Usage:
-#   ./scripts/bridges/sweep_robust_scaling.sh                   # all 15
+#   ./scripts/bridges/sweep_robust_scaling.sh                   # all 15 (small)
+#   ./scripts/bridges/sweep_robust_scaling.sh --size medium     # 15 jobs against medium-* tokens
 #   ./scripts/bridges/sweep_robust_scaling.sh --vqvae sc341     # 5 jobs
 #   ./scripts/bridges/sweep_robust_scaling.sh --label s13       # all VQs at s13
-#   ./scripts/bridges/sweep_robust_scaling.sh --vqvae sc917 --label s34
+#   ./scripts/bridges/sweep_robust_scaling.sh --size large --vqvae sc917 --label s34
 #   ./scripts/bridges/sweep_robust_scaling.sh --dry-run
 #   ./scripts/bridges/sweep_robust_scaling.sh --list
 
@@ -45,32 +46,33 @@ SUBSTITUTION_RATE=0.1
 WANDB_PROJECT="gust2-nsp-robust-scaling-bridges"
 
 # ---------- Sweep grid ----------
-# Five sizes per VQ, bracketing the projected D/P ≈ 0.54 optimum:
+# Five NSP sizes per VQ, bracketing the projected D/P ≈ 0.54 optimum:
 #   sc341  optimum ~12.65 M  (anchor = s13)
 #   sc917  optimum ~34.08 M  (anchor = s34)
 #   sc1941 optimum ~72.18 M  (anchor = s73)
-# Format per row: vq:label:L:d:h
+# Format per row: sc_cfg:label:L:d:h  (the VQ size prefix — small/medium/large
+# — is prepended at submission time from --size, defaulting to small).
 TASKS=(
     # sc341 — anchor s13 (existing micro arch)
-    "small-sc341:s06:2:256:4"
-    "small-sc341:s09:1:384:6"
-    "small-sc341:s13:3:384:6"
-    "small-sc341:s18:6:384:6"
-    "small-sc341:s24:4:512:8"
+    "sc341:s06:2:256:4"
+    "sc341:s09:1:384:6"
+    "sc341:s13:3:384:6"
+    "sc341:s18:6:384:6"
+    "sc341:s24:4:512:8"
 
     # sc917 — anchor s34
-    "small-sc917:s13:3:384:6"
-    "small-sc917:s22:8:384:6"
-    "small-sc917:s34:5:576:9"
-    "small-sc917:s50:9:576:9"
-    "small-sc917:s74:3:1024:16"
+    "sc917:s13:3:384:6"
+    "sc917:s22:8:384:6"
+    "sc917:s34:5:576:9"
+    "sc917:s50:9:576:9"
+    "sc917:s74:3:1024:16"
 
     # sc1941 — anchor s73
-    "small-sc1941:s31:4:576:9"
-    "small-sc1941:s48:6:640:10"
-    "small-sc1941:s73:7:768:12"
-    "small-sc1941:s113:6:1024:16"
-    "small-sc1941:s139:8:1024:8"
+    "sc1941:s31:4:576:9"
+    "sc1941:s48:6:640:10"
+    "sc1941:s73:7:768:12"
+    "sc1941:s113:6:1024:16"
+    "sc1941:s139:8:1024:8"
 )
 
 # ---------- Wandb id helper ----------
@@ -94,34 +96,24 @@ get_or_create_wandb_id() {
 DRY_RUN=false
 FILTER_VQVAE=""
 FILTER_LABEL=""
+SIZE="small"
+LIST_ONLY=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) DRY_RUN=true; shift ;;
         --vqvae) FILTER_VQVAE="$2"; shift 2 ;;
         --label) FILTER_LABEL="$2"; shift 2 ;;
-        --list)
-            echo "Robust-recipe scaling sweep — 15 (VQ × NSP) combos:"
-            echo ""
-            printf "  %-14s %-6s %3s %5s %4s\n" "VQ"  "label" "L" "d" "h"
-            printf "  %-14s %-6s %3s %5s %4s\n" "--"  "-----" "-" "-" "-"
-            for spec in "${TASKS[@]}"; do
-                IFS=':' read -r v l L d h <<< "${spec}"
-                printf "  %-14s %-6s %3s %5s %4s\n" "${v}" "${l}" "${L}" "${d}" "${h}"
-            done
-            echo ""
-            echo "Robust knobs: substitution_rate=${SUBSTITUTION_RATE}, n_refine=${N_REFINE_LAYERS}"
-            echo "GPUs:         4× H100-80 per job, global batch=${BATCH_SIZE} (32/GPU), LR=${LR}"
-            echo "Walltime:     12h/job — resubmit to resume."
-            exit 0
-            ;;
+        --size) SIZE="$2"; shift 2 ;;
+        --list) LIST_ONLY=true; shift ;;
         --help|-h)
             cat <<EOF
-Usage: $0 [--vqvae <substr>] [--label <label>] [--dry-run] [--list]
-  --vqvae <substr>   Filter by VQ-VAE token name (e.g. sc341).
+Usage: $0 [--size {small,medium,large}] [--vqvae <substr>] [--label <label>] [--dry-run] [--list]
+  --size <s>         VQ-VAE size: small (default), medium, or large.
+  --vqvae <substr>   Filter by sc-config substring (e.g. sc341).
   --label <label>    Filter by NSP arch label (e.g. s13).
   --dry-run          Print actions without submitting.
-  --list             Print the 15-combo grid and exit.
+  --list             Print the 15-combo grid (for the chosen --size) and exit.
 EOF
             exit 0
             ;;
@@ -129,13 +121,37 @@ EOF
     esac
 done
 
+case "${SIZE}" in
+    small|medium|large) ;;
+    *) echo "Invalid --size '${SIZE}' (must be small, medium, or large)" >&2; exit 1 ;;
+esac
+
+if [ "${LIST_ONLY}" = true ]; then
+    echo "Robust-recipe scaling sweep — 15 (VQ × NSP) combos  (size=${SIZE}):"
+    echo ""
+    printf "  %-18s %-6s %3s %5s %4s\n" "VQ"  "label" "L" "d" "h"
+    printf "  %-18s %-6s %3s %5s %4s\n" "--"  "-----" "-" "-" "-"
+    for spec in "${TASKS[@]}"; do
+        IFS=':' read -r sc l L d h <<< "${spec}"
+        printf "  %-18s %-6s %3s %5s %4s\n" "${SIZE}-${sc}" "${l}" "${L}" "${d}" "${h}"
+    done
+    echo ""
+    echo "Robust knobs: substitution_rate=${SUBSTITUTION_RATE}, n_refine=${N_REFINE_LAYERS}"
+    echo "GPUs:         4× H100-80 per job, global batch=${BATCH_SIZE} (32/GPU), LR=${LR}"
+    echo "Walltime:     12h/job — resubmit to resume."
+    exit 0
+fi
+
 # ---------- Filter task list ----------
+# Each row in TASKS encodes the sc-config (e.g. sc341); prefix the chosen
+# VQ size to form the full token-set name (e.g. medium-sc341).
 SELECTED=()
 for spec in "${TASKS[@]}"; do
-    IFS=':' read -r v l L d h <<< "${spec}"
+    IFS=':' read -r sc l L d h <<< "${spec}"
+    v="${SIZE}-${sc}"
     if [ -n "${FILTER_VQVAE}" ] && [[ "${v}" != *"${FILTER_VQVAE}"* ]]; then continue; fi
     if [ -n "${FILTER_LABEL}" ] && [ "${l}" != "${FILTER_LABEL}" ]; then continue; fi
-    SELECTED+=("${spec}")
+    SELECTED+=("${v}:${l}:${L}:${d}:${h}")
 done
 
 if [ ${#SELECTED[@]} -eq 0 ]; then
@@ -145,6 +161,7 @@ fi
 
 echo "=========================================="
 echo "Robust-recipe NSP Scaling Sweep (Bridges)"
+echo "  VQ size:          ${SIZE}"
 echo "  Combos:           ${#SELECTED[@]}"
 echo "  Output base:      ${AR_BASE}"
 echo "  Wandb project:    ${WANDB_PROJECT}"
