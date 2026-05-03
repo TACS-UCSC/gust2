@@ -35,15 +35,30 @@ ACCOUNT="mth260004p"
 
 # ---------- Shared training config ----------
 N_REFINE_LAYERS=2
-BATCH_SIZE=128                    # 32/GPU × 4 H100-80 — fills the headroom
 EPOCHS=400
-LR=2e-4                           # linear-scaled with 2× batch vs validated 1e-4 @ 64
 WEIGHT_DECAY=1e-4
 GRAD_CLIP=1.0
 SAVE_EVERY=5
 SEED=42
 SUBSTITUTION_RATE=0.1
 WANDB_PROJECT="gust2-nsp-robust-scaling-bridges"
+
+# Per-sc-config batch size + LR. sc1941 has 5.7× the tokens of sc341 and
+# OOMs on 4× H100-80 at batch=128, so it falls back to the originally
+# validated batch=64 / lr=1e-4. sc341/sc917 keep the bumped batch=128
+# / lr=2e-4 (linear-scaled from the same validated recipe).
+batch_for_sccfg() {
+    case "$1" in
+        sc1941) echo 64 ;;
+        *)      echo 128 ;;
+    esac
+}
+lr_for_sccfg() {
+    case "$1" in
+        sc1941) echo 1e-4 ;;
+        *)      echo 2e-4 ;;
+    esac
+}
 
 # ---------- Sweep grid ----------
 # Five NSP sizes per VQ, bracketing the projected D/P ≈ 0.54 optimum:
@@ -137,7 +152,8 @@ if [ "${LIST_ONLY}" = true ]; then
     done
     echo ""
     echo "Robust knobs: substitution_rate=${SUBSTITUTION_RATE}, n_refine=${N_REFINE_LAYERS}"
-    echo "GPUs:         4× H100-80 per job, global batch=${BATCH_SIZE} (32/GPU), LR=${LR}"
+    echo "GPUs:         4× H100-80 per job"
+    echo "Batch/LR:     sc341/sc917 → 128 (32/GPU) @ 2e-4   sc1941 → 64 (16/GPU) @ 1e-4"
     echo "Walltime:     12h/job — resubmit to resume."
     exit 0
 fi
@@ -167,7 +183,7 @@ echo "  Output base:      ${AR_BASE}"
 echo "  Wandb project:    ${WANDB_PROJECT}"
 echo "  Substitution rate:${SUBSTITUTION_RATE}"
 echo "  GPUs/job:         4× H100-80 (GPU-shared)"
-echo "  Global batch:     ${BATCH_SIZE} (32/GPU)  LR=${LR}"
+echo "  Batch/LR:         sc341/sc917 → 128 @ 2e-4   sc1941 → 64 @ 1e-4"
 echo "  Walltime:         12h/job (resubmit to resume)"
 echo "  Dry run:          ${DRY_RUN}"
 echo "=========================================="
@@ -193,6 +209,9 @@ for spec in "${SELECTED[@]}"; do
 
     SC_CFG="${VQVAE_NAME#*-}"
     WANDB_GROUP="${SC_CFG}-scaling"
+    BATCH_SIZE=$(batch_for_sccfg "${SC_CFG}")
+    LR=$(lr_for_sccfg "${SC_CFG}")
+    PER_GPU=$((BATCH_SIZE / 4))
 
     RESUME_FLAG=""
     if [ -f "${CHECKPOINT_DIR}/training_state.json" ]; then
@@ -232,7 +251,7 @@ echo "Tokens:        ${TOKENS_PATH}"
 echo "Train tokens:  ${TRAIN_TOKENS}  (per-position mask + substitution pool)"
 echo "Substitution:  ${SUBSTITUTION_RATE}"
 echo "Ckpt dir:      ${CHECKPOINT_DIR}"
-echo "Batch:         ${BATCH_SIZE}  (32/GPU)  LR=${LR}"
+echo "Batch:         ${BATCH_SIZE}  (${PER_GPU}/GPU)  LR=${LR}"
 echo "Wandb:         ${WANDB_PROJECT} / ${RUN_NAME}  (id=${WANDB_ID}, group=${WANDB_GROUP})"
 echo "Resume:        ${RESUME_FLAG:-no}"
 echo "=========================================="
