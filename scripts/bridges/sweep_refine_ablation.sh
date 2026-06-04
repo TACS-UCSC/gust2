@@ -50,7 +50,7 @@ BATCH_SIZE=64
 PER_GPU=$((BATCH_SIZE / 4))
 LR=1e-4
 WALLTIME="24:00:00"
-WANDB_PROJECT="gust2-nsp-robust-scaling-bridges"
+WANDB_PROJECT="gust2-nsp-refine-ablation"
 WANDB_GROUP="sc1941-refine-ablation"
 
 # ---------- Ablation grid ----------
