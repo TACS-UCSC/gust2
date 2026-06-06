@@ -24,7 +24,7 @@ ANALYSIS_BASE="${OCEAN}/experiments/analysis-temp-sweep"
 WANDB_BASE="${OCEAN}/wandb"
 ACCOUNT="mth260004p"
 
-TEMPERATURES=(0.8 1.0 1.2 1.4 1.6)
+TEMPERATURES=(1.8 2.0 2.2 2.5 3.0)
 SEEDS=(0)
 
 # "<vqvae_name>:<full_run_name>" — robust-scaling anchors.
