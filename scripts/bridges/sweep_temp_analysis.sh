@@ -1,9 +1,10 @@
 #!/bin/bash
-# Temperature sweep (spectral analysis) for the robust-scaling anchor models.
+# Temperature sweep (spectral analysis) for a target robust-scaling NSP model.
 # Decodes the rollouts produced by sweep_temp_rollout.sh, computes time-
 # averaged TKE/enstrophy spectra + pixel histogram + RSE/EMD, and logs to a
-# per-sc-config wandb project (gust2-sampling-<sc>). The spectra are the
-# "is the steady state over-diffuse?" readout for the temperature sweep.
+# per-sc-config wandb project (gust2-sampling-<sc>). The key readout is the
+# joint emd∧tke gap vs the VQ-VAE floor: a GENUINE floor-beat needs BOTH
+# emd and tke_rse below floor; tke-below-floor alone is the noise artifact.
 #
 # Temperatures, seeds, and the model list must match sweep_temp_rollout.sh.
 # Writes to experiments/analysis-temp-sweep/.
@@ -11,7 +12,7 @@
 # Usage:
 #   ./scripts/bridges/sweep_temp_analysis.sh              Submit all analysis jobs
 #   ./scripts/bridges/sweep_temp_analysis.sh --dry-run
-#   ./scripts/bridges/sweep_temp_analysis.sh --vqvae sc1941   Only sc1941 model
+#   ./scripts/bridges/sweep_temp_analysis.sh --vqvae sc341   Only sc341 model
 
 set -euo pipefail
 
@@ -24,13 +25,12 @@ ANALYSIS_BASE="${OCEAN}/experiments/analysis-temp-sweep"
 WANDB_BASE="${OCEAN}/wandb"
 ACCOUNT="mth260004p"
 
-TEMPERATURES=(1.8 2.0 2.2 2.5 3.0)
-SEEDS=(0)
+TEMPERATURES=(0.6 0.8 1.0 1.2 1.4 1.6)
+SEEDS=(0 1 2)
 
-# "<vqvae_name>:<full_run_name>" — robust-scaling anchors.
+# "<vqvae_name>:<full_run_name>" — target NSP model(s).
 MODELS=(
-    "large-sc917:large-sc917-nsp-s34"
-    "large-sc1941:large-sc1941-nsp-s73"
+    "medium-sc341:medium-sc341-nsp-s18"
 )
 
 # ---------- Parse args ----------

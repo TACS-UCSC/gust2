@@ -1,22 +1,23 @@
 #!/bin/bash
-# Temperature sweep (rollouts) for the robust-scaling anchor models.
+# Temperature sweep (rollouts) for a target robust-scaling NSP model.
 #
-# Diffusive-collapse diagnostic: long autoregressive rollouts relax to an
-# over-diffuse steady state. We've ruled out single-step modeling (sc341/
-# sc917/sc1941 all sit at the tokenizer's single-step ceiling), so this
-# probes the rollout/sampling dynamics by sweeping the global sampling
-# temperature and asking whether more dispersion refills the high-k tail.
+# Floor-beating investigation: medium-sc341-nsp-large beat the VQ-VAE
+# reconstruction floor on BOTH emd (g0.43) and tke_rse (g0.84) on Derecho,
+# but the winning rollout's temperature was never logged. This sweeps the
+# Bridges robust-scaling sibling medium-sc341-nsp-s18 (cleanest EMD-floor-
+# beater, emd g0.56) across temperature with multiple seeds, to map where
+# the joint emd∧tke sub-floor lives and whether it's reproducible (vs a
+# lucky single trajectory). TKE-below-floor ALONE is the gameable noise
+# artifact — genuine only when EMD is also at/below floor.
 #
-# Repurposed from sweep_sampling_rollout.sh, but targets the robust-scaling
-# layout (experiments/ar-robust-scaling, run names <vq>-nsp-<label>) and a
-# fixed two-model list instead of the old <vq>-nsp-<size> grid. Writes to
-# experiments/rollouts-temp-sweep/ to stay isolated. No wandb here — the
-# companion sweep_temp_analysis.sh decodes these rollouts and logs spectra.
+# Targets the robust-scaling layout (experiments/ar-robust-scaling, run
+# names <vq>-nsp-<label>). Writes to experiments/rollouts-temp-sweep/. No
+# wandb here — companion sweep_temp_analysis.sh decodes + logs spectra.
 #
 # Usage:
 #   ./scripts/bridges/sweep_temp_rollout.sh              Submit the full grid
 #   ./scripts/bridges/sweep_temp_rollout.sh --dry-run
-#   ./scripts/bridges/sweep_temp_rollout.sh --vqvae sc917   Only sc917 model
+#   ./scripts/bridges/sweep_temp_rollout.sh --vqvae sc341   Only sc341 model
 
 set -euo pipefail
 
@@ -30,13 +31,12 @@ ACCOUNT="mth260004p"
 N_STEPS=2000
 START_FRAME=0
 
-TEMPERATURES=(1.8 2.0 2.2 2.5 3.0)
-SEEDS=(0)
+TEMPERATURES=(0.6 0.8 1.0 1.2 1.4 1.6)
+SEEDS=(0 1 2)
 
-# "<vqvae_name>:<full_run_name>" — robust-scaling anchors.
+# "<vqvae_name>:<full_run_name>" — target NSP model(s).
 MODELS=(
-    "large-sc917:large-sc917-nsp-s34"
-    "large-sc1941:large-sc1941-nsp-s73"
+    "medium-sc341:medium-sc341-nsp-s18"
 )
 
 # ---------- Parse args ----------
