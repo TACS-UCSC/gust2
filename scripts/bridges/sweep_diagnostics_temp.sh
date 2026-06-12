@@ -1,9 +1,11 @@
 #!/bin/bash
-# Cold-temperature collapse-diagnostics sweep with the per-position mask ON.
+# Full-temperature collapse-diagnostics sweep with the per-position mask ON,
+# multi-trajectory ("multiseed") ensembles, all three sc configs.
 #
-# Studies *diffusive* collapse under cold sampling (the mean-reversion mode
-# that survives the position mask), as opposed to the positional-OOD
-# explosion the April no-mask sweeps showed. Per model:
+# The grid spans the diffusive-collapse regime (T < 1.2, the mean-reversion
+# mode that survives the position mask), both EMD optima (sc1941 ≈ 1.4,
+# sc917 ≈ 1.6), and the high-T noise regime (2.0-3.0, known to game TKE
+# RSE). Also sweeps sc341 hot for the first time (paper P0 #3). Per model:
 #
 #   Stage 1 (parallel, 1 GPU each):  multi-trajectory rollout per temperature
 #       with --train_tokens_path (per-position mask) and --log_topk
@@ -17,11 +19,16 @@
 # All stages log to wandb project gust2-diagnostics-bridges,
 # group <run_name>-<group_tag>, job_type per stage.
 #
+# Storage: rollout_logits.npz ≈ N × n_steps × tokens × K × 4 bytes ≈
+# 4.4/2.8/3.0 GB per cfg for sc341/sc917/sc1941 → ~122 GB for the full
+# 36-cfg matrix under ${DIAG_BASE}/${GROUP_TAG}. Prune hot-temp logits
+# after analysis if quota matters.
+#
 # Usage:
-#   ./scripts/bridges/sweep_diagnostics_cold.sh              # both models
-#   ./scripts/bridges/sweep_diagnostics_cold.sh --model sc341
-#   ./scripts/bridges/sweep_diagnostics_cold.sh --dry-run
-#   ./scripts/bridges/sweep_diagnostics_cold.sh --list
+#   ./scripts/bridges/sweep_diagnostics_temp.sh              # all 3 models
+#   ./scripts/bridges/sweep_diagnostics_temp.sh --model sc1941
+#   ./scripts/bridges/sweep_diagnostics_temp.sh --dry-run
+#   ./scripts/bridges/sweep_diagnostics_temp.sh --list
 
 set -euo pipefail
 
@@ -37,26 +44,30 @@ WANDB_BASE="${OCEAN}/wandb"
 ACCOUNT="mth260004p"
 
 # ---------- Sweep config ----------
-GROUP_TAG="posmask-cold"
+GROUP_TAG="posmask-temp"
 WANDB_PROJECT="gust2-diagnostics-bridges"
 N_STEPS=2000
 START_FRAME=0
 SEED=0
 BATCH_SIZE=64
 
-# NOTE: temperatures < 1.0 are DELIBERATE here, overriding the usual
+# NOTE: temperatures != 1.0 are DELIBERATE here, overriding the usual
 # "rollout sweeps always use --temperature 1.0, greedy is broken" project
-# convention. This sweep *studies* diffusive collapse under cold sampling
-# with the per-position mask ON. Do not "fix" these back to 1.0.
-TEMPERATURES=(0.7 0.8 0.9 1.0 1.2)
+# convention. This sweep *studies* sampling temperature with the
+# per-position mask ON: cold (<1.2) for diffusive collapse, mid for the
+# EMD optima, hot (2.0-3.0) for the noise regime. Do not "fix" to 1.0-only.
+TEMPERATURES=(0.7 0.8 0.9 1.0 1.1 1.2 1.4 1.6 1.8 2.0 2.5 3.0)
 
-# "<vqvae_name>:<run_name>:<n_traj>:<log_topk>"
-# sc341 flagship at N=25/K=64 matches the April Derecho multitraj sweep for
-# direct comparison; sc917 runs reduced N/K to cap rollout_logits.npz size
-# (bytes ≈ N × n_steps × tokens × K × 4).
+# "<vqvae_name>:<run_name>:<n_traj>:<log_topk>:<rollout_walltime_hours>"
+# Anchors: sc341 s18 (beyond-anchor flagship; N=25/K=64 matches the April
+# Derecho multitraj sweep for direct comparison), sc917 s34, sc1941 s73.
+# sc917/sc1941 run reduced N/K to cap rollout_logits.npz size
+# (bytes ≈ N × n_steps × tokens × K × 4); sc1941 has 5.7× sc341's tokens
+# per frame, hence the longer rollout walltime.
 MODELS=(
-    "small-sc341:small-sc341-nsp-s18:25:64"
-    "small-sc917:small-sc917-nsp-s34:12:32"
+    "small-sc341:small-sc341-nsp-s18:25:64:6"
+    "small-sc917:small-sc917-nsp-s34:12:32:6"
+    "small-sc1941:small-sc1941-nsp-s73:12:16:16"
 )
 
 # ---------- Parse args ----------
@@ -83,24 +94,26 @@ EOF
 done
 
 if [ "${LIST_ONLY}" = true ]; then
-    echo "Cold-temperature diagnostics sweep (${GROUP_TAG}):"
+    echo "Full-temperature diagnostics sweep (${GROUP_TAG}):"
     echo ""
-    printf "  %-14s %-24s %7s %6s\n" "VQ" "NSP run" "n_traj" "log_K"
-    printf "  %-14s %-24s %7s %6s\n" "--" "-------" "------" "-----"
+    printf "  %-14s %-24s %7s %6s %9s\n" "VQ" "NSP run" "n_traj" "log_K" "rollout-t"
+    printf "  %-14s %-24s %7s %6s %9s\n" "--" "-------" "------" "-----" "---------"
     for spec in "${MODELS[@]}"; do
-        IFS=':' read -r vq run ntraj topk <<< "${spec}"
-        printf "  %-14s %-24s %7s %6s\n" "${vq}" "${run}" "${ntraj}" "${topk}"
+        IFS=':' read -r vq run ntraj topk wh <<< "${spec}"
+        printf "  %-14s %-24s %7s %6s %8sh\n" "${vq}" "${run}" "${ntraj}" "${topk}" "${wh}"
     done
     echo ""
-    echo "Temperatures: ${TEMPERATURES[*]}  (cold sweep — deliberate, see header)"
+    echo "Temperatures: ${TEMPERATURES[*]}"
+    echo "              (full grid — deliberate, see header; not T=1.0-only)"
     echo "Rollout:      ${N_STEPS} steps, start_frame=${START_FRAME}, posmask ON"
-    echo "Jobs/model:   ${#TEMPERATURES[@]} rollout (6h) + 1 diagnostics (8h)"
+    echo "Jobs/model:   ${#TEMPERATURES[@]} rollout + 1 diagnostics (12h)"
+    echo "Total:        $(( ${#MODELS[@]} * (${#TEMPERATURES[@]} + 1) )) jobs"
     echo "Wandb:        ${WANDB_PROJECT}, group=<run>-${GROUP_TAG}"
     exit 0
 fi
 
 echo "=========================================="
-echo "Cold-temp posmask diagnostics sweep"
+echo "Full-temp posmask diagnostics sweep"
 echo "  Models:        ${#MODELS[@]} (filter: '${FILTER_MODEL:-none}')"
 echo "  Temperatures:  ${TEMPERATURES[*]}"
 echo "  Output base:   ${DIAG_BASE}/${GROUP_TAG}"
@@ -111,7 +124,7 @@ echo "=========================================="
 N_SUBMITTED=0
 
 for spec in "${MODELS[@]}"; do
-    IFS=':' read -r VQVAE_NAME RUN_NAME N_TRAJ LOG_TOPK <<< "${spec}"
+    IFS=':' read -r VQVAE_NAME RUN_NAME N_TRAJ LOG_TOPK WALLTIME_H <<< "${spec}"
 
     if [ -n "${FILTER_MODEL}" ] && [[ "${RUN_NAME}" != *"${FILTER_MODEL}"* ]]; then
         continue
@@ -168,7 +181,7 @@ for spec in "${MODELS[@]}"; do
 #SBATCH -N 1
 #SBATCH --gres=gpu:h100-80:1
 #SBATCH --exclude=w009
-#SBATCH -t 6:00:00
+#SBATCH -t ${WALLTIME_H}:00:00
 #SBATCH -o ${LOG_DIR}/${RUN_NAME}-${CFG}-%j.out
 #SBATCH -e ${LOG_DIR}/${RUN_NAME}-${CFG}-%j.err
 
@@ -237,7 +250,7 @@ SBATCH_EOF
 #SBATCH -N 1
 #SBATCH --gres=gpu:h100-80:1
 #SBATCH --exclude=w009
-#SBATCH -t 8:00:00
+#SBATCH -t 12:00:00
 #SBATCH -o ${LOG_DIR}/${RUN_NAME}-diagnostics-%j.out
 #SBATCH -e ${LOG_DIR}/${RUN_NAME}-diagnostics-%j.err
 

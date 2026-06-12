@@ -268,9 +268,11 @@ def explosion_rug(ax, explosion_t, n_frames, color="C3"):
             transform=ax.get_xaxis_transform(), clip_on=False)
 
 
-def temp_color(temperature, vmin=0.6, vmax=1.6):
+def temp_color(temperature, vmin=0.6, vmax=2.0):
     """Fixed temperature -> color mapping (coolwarm over [vmin, vmax]) so
-    color means the same thing in every figure of every stage."""
+    color means the same thing in every figure of every stage. Hotter than
+    vmax (the 2.5/3.0 noise-regime probes) clips to full red — exact hue
+    there carries no information."""
     if temperature is None:
         return None
     t = (float(temperature) - vmin) / (vmax - vmin)
@@ -292,15 +294,19 @@ def assign_cfg_styles(metas):
     unknown = [c for c in cfgs if metas[c].get("temperature") is None]
     fallback = plt.cm.viridis(np.linspace(0, 0.9, max(1, len(unknown))))
     styles = {}
-    seen_per_temp = {}
+    seen_per_color = {}
     for cfg in cfgs:
         t = metas[cfg].get("temperature")
         if t is None:
             color = fallback[unknown.index(cfg)]
         else:
             color = temp_color(t)
-        k = seen_per_temp.get(t, 0)
-        seen_per_temp[t] = k + 1
+        # De-dup on the resolved color, not the temperature: same-T decode
+        # variants AND beyond-vmax temps that clip to the same hue both get
+        # distinct linestyles.
+        ckey = tuple(np.round(np.asarray(color), 4))
+        k = seen_per_color.get(ckey, 0)
+        seen_per_color[ckey] = k + 1
         styles[cfg] = {"color": color, "ls": _LINESTYLES[k % len(_LINESTYLES)]}
     return styles
 
