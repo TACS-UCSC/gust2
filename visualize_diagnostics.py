@@ -27,6 +27,9 @@ Figures (written to --output_dir, default <sweep_root>/visual):
 
 CPU-only figures 1-3 run anywhere (login node OK) with --skip_decode.
 
+Batch submission (one 1-GPU job per model, figures also logged to wandb):
+  ./scripts/bridges/submit_visualize.sh [--model sc1941] [--dry-run]
+
 Interactive-node usage on Bridges2:
   srun -p GPU-shared --gres=gpu:h100-80:1 -N 1 -A mth260004p \\
        -t 2:00:00 --pty bash
