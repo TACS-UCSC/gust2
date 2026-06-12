@@ -401,6 +401,26 @@ def main():
     np.savez_compressed(tokens_path, **save_dict)
     print(f"  Tokens: {tokens_path} (shape {rollout_tokens.shape}, N={N})")
 
+    # Decode-parameter metadata for downstream diagnostics (cfg discovery,
+    # temperature-keyed plot colors) — see diagnostics_common.load_cfg_meta.
+    cfg_meta = {
+        "temperature": temperature,
+        "top_k": top_k,
+        "top_p": top_p,
+        "seed": args.seed,
+        "n_trajectories": int(N),
+        "n_steps": args.n_steps,
+        "start_frame": int(start_frames[0]),
+        "log_topk": log_topk,
+        "position_mask_used": bool(position_mask_np is not None),
+        "checkpoint_dir": args.checkpoint_dir,
+        "tokens_path": args.tokens_path,
+    }
+    cfg_meta_path = os.path.join(args.output_dir, "cfg_meta.json")
+    with open(cfg_meta_path, "w") as f:
+        json.dump(cfg_meta, f, indent=2)
+    print(f"  Meta: {cfg_meta_path}")
+
     # --- Save per-emission top-K logits for offline diagnostics ---
     if log_topk > 0:
         # Stack along a step axis -> (N, n_steps, tokens_per_frame, log_topk)

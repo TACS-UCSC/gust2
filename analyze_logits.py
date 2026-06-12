@@ -2,7 +2,7 @@
 
 Loads the top-K logits + indices recorded by `rollout_nsp.py --log_topk K`,
 plus the predicted token IDs from rollout_tokens.npz, and computes per-token
-diagnostics. The hypothesis being tested is that explosion is preceded by
+diagnostics. The hypothesis being tested is that collapse is preceded by
 either (a) a confident-but-wrong prediction (high top-1 prob, OOD sample)
 or (b) a high-entropy frame where the sampler reaches into the tail and
 poisons the autoregressive context.
@@ -10,7 +10,7 @@ poisons the autoregressive context.
 We compute, per emitted token:
   - top-1 head softmax probability  (= max prob among captured top-K)
   - entropy over top-K head softmax  (lower bound on full entropy)
-  - top-K coverage  (sum of head softmax — 1.0 if K covers the full mass)
+  - logit gap (top-1 minus K-th captured logit; large = peaky head)
   - rank of the sampled token within top-K (or -1 if it fell outside)
   - sampled-token head logprob (or NaN if outside top-K)
 
@@ -20,12 +20,14 @@ Aggregations per frame:
 
 Outputs (per --rollout_dir):
   diagnostics.npz  — per-trajectory per-frame numeric traces
-  diagnostics.png  — 2×3 panel:
-      (a) mean top-1 prob vs t            (b) mean entropy vs t
-      (c) frac outside top-K vs t         (d) per-scale entropy heatmap
-      (e) per-scale outside-rate heatmap  (f) pre/post-explosion top-1 hist
-  Lines colored by survival; vertical markers per traj at explosion time
-  if the matching multitraj_survival.py output is available.
+  diagnostics.png  — 2×3 panel: survived/collapsed median+IQR bands for
+      top-1 prob, entropy, frac-outside-top-K (or logit gap when that
+      panel is identically zero), per-scale heatmaps, pre/post-explosion
+      top-1 histogram. Explosion times drawn as a rug along the x-axis.
+
+Pass --survival_json to align against multitraj_survival.py explosion
+times; without it a sibling <root>/survival/survival.json is tried, else
+all trajectories are assumed survived.
 """
 import argparse
 import json
@@ -33,7 +35,23 @@ import os
 
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.special import softmax
+
+from diagnostics_common import (
+    add_wandb_args,
+    band_plot,
+    build_scale_ids,
+    describe_decode,
+    explosion_rug,
+    get_explosion_times,
+    init_wandb,
+    is_effectively_zero,
+    load_cfg_meta,
+    load_survival,
+    outside_legend,
+    safe_median,
+    set_diag_style,
+    wandb_log_figs_and_scalars,
+)
 
 
 def per_token_stats(top_logits, top_indices, sampled_ids):
@@ -45,7 +63,7 @@ def per_token_stats(top_logits, top_indices, sampled_ids):
         sampled_ids: (...,)   int — actually-sampled token ID per emission
 
     Returns dict of (...,) arrays:
-        top1_prob, entropy, coverage, sampled_rank, sampled_logprob
+        top1_prob, entropy, logit_gap, in_topk, sampled_rank, sampled_logprob
     """
     L = top_logits.astype(np.float32)
     # Head softmax — note: sums to 1 by construction over the K entries,
@@ -56,12 +74,6 @@ def per_token_stats(top_logits, top_indices, sampled_ids):
     sum_el = el.sum(axis=-1, keepdims=True)
     head_probs = el / sum_el                                # (..., K)
 
-    # Coverage estimate vs *full* dist: sum_el / sum_el_full. We don't have
-    # the full denom, but we can still report top-1 prob within head and
-    # entropy within head. Coverage proxy = 1 - top-K-tail-mass-share, which
-    # we don't know. Cleanest: report sum(head_probs) which is always 1, and
-    # separately the *gap* between top-1 logit and K-th logit (small gap →
-    # mass likely escapes top-K).
     top1_prob = head_probs[..., 0]
     # Truncated entropy (sums to 1 over top-K)
     entropy = -(head_probs * np.log(head_probs + 1e-30)).sum(axis=-1)
@@ -112,10 +124,7 @@ def aggregate_per_frame(stats, mask_trainable, scale_ids, n_scales):
     per_scale = {}
 
     for k, v in stats.items():
-        if v.dtype == bool:
-            v = v.astype(np.float32)
-        else:
-            v = v.astype(np.float32)
+        v = v.astype(np.float32)
         # Overall: nanmean over trainable positions (sampled_logprob has NaN
         # where the sampled token fell outside top-K).
         m = mask_trainable[None, None, :]
@@ -137,23 +146,14 @@ def aggregate_per_frame(stats, mask_trainable, scale_ids, n_scales):
     return overall, per_scale
 
 
-def build_scale_ids(scales, first_trainable_scale):
-    """Build a (tokens,) array of scale index per slot, plus a trainable mask."""
-    scale_ids = []
-    for k, s in enumerate(scales):
-        scale_ids.extend([k] * (s * s))
-    scale_ids = np.array(scale_ids, dtype=np.int32)
-    trainable = scale_ids >= first_trainable_scale
-    return scale_ids, trainable
-
-
-def load_explosion_times(rollout_dir, n_traj, n_steps):
-    """Look for a sibling multitraj_survival.py output and return per-traj
-    explosion times (or all-survived if nothing found)."""
-    # Heuristic: ../survival/<cfg>/  or ../analysis/  — the analyzer's output
-    # location varies per sweep. We just scan a few candidate roots.
+def load_explosion_times(args, rollout_dir, n_traj, n_steps):
+    """Explosion times from --survival_json, falling back to the sibling
+    <root>/survival/survival.json heuristic, else all-survived."""
     cfg = os.path.basename(os.path.dirname(rollout_dir.rstrip("/")))
-    candidates = [
+    candidates = []
+    if args.survival_json:
+        candidates.append(args.survival_json)
+    candidates += [
         os.path.join(os.path.dirname(os.path.dirname(rollout_dir)),
                      "survival", "survival.json"),
         os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -161,10 +161,9 @@ def load_explosion_times(rollout_dir, n_traj, n_steps):
     ]
     for c in candidates:
         if os.path.isfile(c):
-            with open(c) as f:
-                surv = json.load(f)
+            surv = load_survival(c)
             if cfg in surv.get("configs", {}):
-                et = np.array(surv["configs"][cfg]["explosion_t"])
+                et, _, _ = get_explosion_times(surv, cfg, n_traj)
                 return et, c
     return np.full(n_traj, n_steps, dtype=np.int64), None
 
@@ -174,10 +173,23 @@ def main():
     p.add_argument("--rollout_dir", required=True,
                    help="dir with rollout_tokens.npz + rollout_logits.npz")
     p.add_argument("--output_dir", required=True)
+    p.add_argument("--survival_json", default=None,
+                   help="multitraj_survival.py output; explosion times for "
+                        "this cfg are looked up by directory name. Falls "
+                        "back to a sibling-path heuristic when omitted.")
+    p.add_argument("--cfg_name", default=None,
+                   help="cfg label for titles/wandb (default: rollout_dir's "
+                        "parent directory name)")
     p.add_argument("--scale_ema", type=int, default=20,
-                   help="EMA window for smoothing per-frame traces")
+                   help="EMA window for smoothing per-frame traces in plots "
+                        "(npz traces stay unsmoothed)")
+    add_wandb_args(p)
     args = p.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+
+    cfg_name = args.cfg_name or os.path.basename(
+        os.path.dirname(args.rollout_dir.rstrip("/")))
+    cfg_meta = load_cfg_meta(os.path.dirname(args.rollout_dir.rstrip("/")))
 
     print(f"Loading {args.rollout_dir}")
     tok_npz = np.load(os.path.join(args.rollout_dir, "rollout_tokens.npz"),
@@ -217,7 +229,8 @@ def main():
         stats, trainable_mask, scale_ids, n_scales)
     frac_outside = 1.0 - overall["in_topk"]                   # (N, T)
 
-    explosion_t, surv_src = load_explosion_times(args.rollout_dir, N, n_steps)
+    explosion_t, surv_src = load_explosion_times(
+        args, args.rollout_dir, N, n_steps)
     survived = explosion_t >= n_steps
     n_surv = int(survived.sum())
     print(f"  Explosion source: {surv_src or 'none — assumed all survived'}")
@@ -237,33 +250,41 @@ def main():
     print(f"  Saved {out_npz}")
 
     # ---- Plots ----
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    set_diag_style()
+    fig, axes = plt.subplots(2, 3, figsize=(16, 9), constrained_layout=True)
     ts = np.arange(1, T + 1)
     surv_color = "C2"
     coll_color = "C3"
 
-    def plot_traces(ax, y, title, ylabel):
-        for j in range(N):
-            color = surv_color if survived[j] else coll_color
-            ax.plot(ts, y[j], lw=0.6, alpha=0.55, color=color)
-            if not survived[j]:
-                ax.axvline(explosion_t[j], color=color,
-                           lw=0.4, alpha=0.3, ls="--")
+    def plot_groups(ax, y, title, ylabel):
+        """Survived/collapsed median+IQR bands; explosion times as a rug."""
+        band_plot(ax, ts, y[survived], color=surv_color, label="survived",
+                  smooth=args.scale_ema)
+        band_plot(ax, ts, y[~survived], color=coll_color, label="collapsed",
+                  smooth=args.scale_ema)
+        explosion_rug(ax, explosion_t, n_steps, color=coll_color)
         ax.set_xlabel("rollout step t")
         ax.set_ylabel(ylabel)
         ax.set_title(title)
-        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best")
 
-    plot_traces(axes[0, 0], overall["top1_prob"],
-                f"Top-1 head prob (mean over trainable tokens)",
+    plot_groups(axes[0, 0], overall["top1_prob"],
+                "Top-1 head prob (mean over trainable tokens)",
                 "P(arg-max)")
-    plot_traces(axes[0, 1], overall["entropy"],
+    plot_groups(axes[0, 1], overall["entropy"],
                 f"Top-{K} head entropy", "nats")
-    plot_traces(axes[0, 2], frac_outside,
-                f"Frac sampled outside top-{K}",
-                "fraction")
+    # The outside-top-K panel is dead weight when sampling never leaves the
+    # captured top-K (typical for cold temperatures); show the logit gap —
+    # head peakiness — instead.
+    if is_effectively_zero(frac_outside, tol=1e-6):
+        plot_groups(axes[0, 2], overall["logit_gap"],
+                    f"Logit gap top-1 − top-{K}\n"
+                    f"(frac outside top-{K} ≡ 0)", "nats")
+    else:
+        plot_groups(axes[0, 2], frac_outside,
+                    f"Frac sampled outside top-{K}", "fraction")
 
-    # Per-scale heatmap of entropy (mean over trajs)
+    # Per-scale heatmaps (mean over trajs)
     ent_ps = np.nanmean(per_scale["entropy"], axis=0)         # (T, n_scales)
     out_ps = 1.0 - np.nanmean(per_scale["in_topk"], axis=0)
     trainable_scales = list(range(first_trainable, n_scales))
@@ -274,17 +295,26 @@ def main():
         im = ax.imshow(sub, aspect="auto", origin="lower", cmap=cmap,
                        extent=[1, T, -0.5, len(trainable_scales) - 0.5])
         ax.set_yticks(range(len(trainable_scales)))
-        ax.set_yticklabels([f"{scales[s]}x{scales[s]}" for s in trainable_scales],
-                           fontsize=8)
+        ax.set_yticklabels(
+            [f"{scales[s]}x{scales[s]}" for s in trainable_scales])
         ax.set_xlabel("rollout step t")
         ax.set_title(title)
+        ax.grid(False)
         plt.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
 
     heatmap(axes[1, 0], ent_ps,
             f"Per-scale top-{K} entropy (traj mean)")
-    heatmap(axes[1, 1], out_ps,
-            f"Per-scale frac outside top-{K} (traj mean)",
-            cmap="magma")
+    # Same dead-panel treatment for the per-scale outside-rate heatmap.
+    if is_effectively_zero(out_ps, tol=1e-6):
+        gap_ps = np.nanmean(per_scale["logit_gap"], axis=0)
+        heatmap(axes[1, 1], gap_ps,
+                f"Per-scale logit gap (traj mean)\n"
+                f"(outside-top-{K} rate ≡ 0)",
+                cmap="magma")
+    else:
+        heatmap(axes[1, 1], out_ps,
+                f"Per-scale frac outside top-{K} (traj mean)",
+                cmap="magma")
 
     # (1, 2): pre/post explosion top-1 prob distribution for collapsed trajs
     ax = axes[1, 2]
@@ -305,20 +335,58 @@ def main():
         ax.set_xlabel("mean top-1 head prob (per frame)")
         ax.set_ylabel("density")
         ax.set_title("Top-1 prob distribution")
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3)
+        ax.legend()
     else:
         ax.text(0.5, 0.5, "no collapsed trajectories",
                 ha="center", va="center", transform=ax.transAxes)
         ax.axis("off")
 
+    desc = describe_decode(cfg_meta)
     fig.suptitle(
-        f"{os.path.basename(os.path.dirname(args.rollout_dir.rstrip('/')))}"
-        f" — N={N}, K={K}, survived {n_surv}/{N}", y=1.00)
-    fig.tight_layout()
+        f"{cfg_name}{f'  [{desc}]' if desc else ''}"
+        f" — N={N}, K={K}, survived {n_surv}/{N}")
     out_png = os.path.join(args.output_dir, "diagnostics.png")
-    fig.savefig(out_png, dpi=130, bbox_inches="tight")
+    fig.savefig(out_png)
     print(f"  Saved {out_png}")
+
+    # ---- Wandb ----
+    run = init_wandb(args, job_type="logits", config={
+        "cfg_name": cfg_name,
+        "rollout_dir": args.rollout_dir,
+        "n_trajectories": N,
+        "n_steps": T,
+        "log_topk": K,
+        "scale_ema": args.scale_ema,
+        **{k: v for k, v in cfg_meta.items()
+           if k in ("temperature", "top_k", "top_p", "seed",
+                    "position_mask_used")},
+    })
+    w = min(100, T)
+    scalars = {
+        "n_trajectories": N,
+        "n_survived": n_surv,
+        "frac_outside_mean": float(np.nanmean(frac_outside)),
+        "top1_prob_mean_first100": float(
+            np.nanmean(overall["top1_prob"][:, :w])),
+        "top1_prob_mean_last100": float(
+            np.nanmean(overall["top1_prob"][:, -w:])),
+        "entropy_mean_first100": float(
+            np.nanmean(overall["entropy"][:, :w])),
+        "entropy_mean_last100": float(
+            np.nanmean(overall["entropy"][:, -w:])),
+    }
+    series = {}
+    for key, label in (("top1_prob", "top-1 prob"), ("entropy", "entropy")):
+        ydict = {}
+        if n_surv:
+            ydict["survived"] = safe_median(overall[key][survived], axis=0)
+        if n_surv < N:
+            ydict["collapsed"] = safe_median(overall[key][~survived], axis=0)
+        if ydict:
+            series[f"{key}_median"] = (
+                ts, ydict, "rollout step t", f"Median {label} vs t")
+    wandb_log_figs_and_scalars(
+        run, scalars=scalars, figs={"diagnostics": fig}, line_series=series)
 
 
 if __name__ == "__main__":

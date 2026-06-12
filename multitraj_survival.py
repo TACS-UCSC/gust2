@@ -19,7 +19,6 @@ Outputs:
   emd_traces.png       — per-cfg small multiples of windowed EMD vs t
 """
 import argparse
-import glob
 import json
 import os
 
@@ -33,6 +32,18 @@ from analyze_rollout import (
     decode_all_tokens,
     load_raw_gt,
     load_rollout_data,
+)
+from diagnostics_common import (
+    add_wandb_args,
+    assign_cfg_styles,
+    band_plot,
+    describe_decode,
+    discover_cfgs,
+    init_wandb,
+    load_cfg_meta,
+    outside_legend,
+    set_diag_style,
+    wandb_log_figs_and_scalars,
 )
 from tokenizer import load_checkpoint
 
@@ -75,6 +86,7 @@ def main():
     p.add_argument("--sample_start", type=int, default=20000)
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--seed", type=int, default=0)
+    add_wandb_args(p)
     args = p.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -85,12 +97,8 @@ def main():
     _, decoder, vq, ema_state, _ = load_checkpoint(args.vqvae_dir, key)
     codebook = ema_state.codebook
 
-    pattern = os.path.join(args.sweep_root, "*", "rollout")
-    cfg_dirs = sorted([
-        d for d in glob.glob(pattern)
-        if os.path.isfile(os.path.join(d, "rollout_tokens.npz"))
-    ])
-    cfgs = [os.path.basename(os.path.dirname(d)) for d in cfg_dirs]
+    cfgs = discover_cfgs(args.sweep_root)
+    cfg_dirs = [os.path.join(args.sweep_root, c, "rollout") for c in cfgs]
     print(f"Found {len(cfgs)} configs: {cfgs}")
     if not cfgs:
         raise SystemExit("No rollout_tokens.npz found.")
@@ -189,7 +197,11 @@ def main():
             "median_t": med_t,
             "survival_at_500":  float((explosion_t > 500).sum() / N),
             "survival_at_1000": float((explosion_t > 1000).sum() / N),
+            # survival_at_2000 is legacy-named (early sweeps were always
+            # 2000 steps); both it and survival_at_end mean survival at the
+            # end of the rollout. Prefer survival_at_end downstream.
             "survival_at_2000": float((explosion_t >= n_frames).sum() / N),
+            "survival_at_end":  float((explosion_t >= n_frames).sum() / N),
             "max_emd_per_traj": emd_at_probe.max(axis=1).tolist(),
         }
         cfg_emd_traces[cfg] = emd_at_probe
@@ -215,21 +227,31 @@ def main():
     print(f"Saved {out_npz}")
 
     # ---------- plots ----------
+    set_diag_style()
+    metas = {cfg: load_cfg_meta(os.path.join(args.sweep_root, cfg))
+             for cfg in cfgs}
+    styles = assign_cfg_styles(metas)
     cfg_order = sorted(
         cfgs,
-        key=lambda c: -results["configs"][c]["survival_at_2000"],
+        key=lambda c: -results["configs"][c]["survival_at_end"],
     )
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(11, 6), constrained_layout=True)
     ts = np.arange(n_frames + 1)
+    survival_curves = {}
     for cfg in cfg_order:
         info = results["configs"][cfg]
         et = np.array(info["explosion_t"])
         survival = np.array([
             float((et > t).sum()) / info["n_trajectories"] for t in ts
         ])
-        ax.step(ts, survival, where="post", lw=1.6, alpha=0.9,
-                label=f"{cfg} (S∞={info['survival_at_2000']:.0%})")
+        survival_curves[cfg] = survival
+        desc = describe_decode(metas[cfg])
+        label = f"{cfg} (S_end={info['survival_at_end']:.0%})"
+        if desc:
+            label = f"{cfg} [{desc}] S_end={info['survival_at_end']:.0%}"
+        ax.step(ts, survival, where="post", lw=1.8, alpha=0.9,
+                color=styles[cfg]["color"], ls=styles[cfg]["ls"], label=label)
     ax.set_xlabel("rollout step t")
     ax.set_ylabel("fraction of trajectories surviving")
     ax.set_title(
@@ -238,42 +260,71 @@ def main():
     )
     ax.set_xlim(0, n_frames)
     ax.set_ylim(-0.02, 1.02)
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper right", fontsize=9)
-    fig.tight_layout()
+    outside_legend(ax)
     out_surv = os.path.join(args.output_dir, "survival_curves.png")
-    fig.savefig(out_surv, dpi=130)
+    fig.savefig(out_surv)
     print(f"Saved {out_surv}")
 
     n_cfg = len(cfgs)
-    ncols = 4
+    ncols = min(4, n_cfg)
     nrows = (n_cfg + ncols - 1) // ncols
     fig2, axes = plt.subplots(nrows, ncols,
-                              figsize=(ncols * 4, nrows * 3),
-                              sharex=True, sharey=True)
+                              figsize=(ncols * 4.5, nrows * 3.2),
+                              sharex=True, sharey=True,
+                              constrained_layout=True)
     axes = np.atleast_2d(axes)
     for ax, cfg in zip(axes.ravel(), cfg_order):
         emd = cfg_emd_traces[cfg]
         et = np.array(results["configs"][cfg]["explosion_t"])
-        for j in range(emd.shape[0]):
-            color = "C3" if et[j] < n_frames else "C2"
-            ax.plot(probe_times, emd[j], lw=0.6, alpha=0.55, color=color)
+        coll = et < n_frames
+        band_plot(ax, probe_times, emd[coll], color="C3", label="collapsed")
+        band_plot(ax, probe_times, emd[~coll], color="C2", label="survived")
         ax.axhline(threshold, lw=0.9, ls="--", color="C0",
                    label=f"thr={threshold:.2f}")
         ax.axhline(vqvae_emd, lw=0.9, ls=":", color="black",
                    label=f"VQ baseline={vqvae_emd:.2f}")
         ax.set_title(
-            f"{cfg}  S∞={results['configs'][cfg]['survival_at_2000']:.0%}"
+            f"{cfg}  S_end="
+            f"{results['configs'][cfg]['survival_at_end']:.0%}",
+            fontsize=11,
         )
         ax.set_xlabel("t")
         ax.set_ylabel("window EMD")
     for ax in axes.ravel()[n_cfg:]:
         ax.axis("off")
     axes.ravel()[0].legend(loc="upper left", fontsize=8)
-    fig2.tight_layout()
     out_traces = os.path.join(args.output_dir, "emd_traces.png")
-    fig2.savefig(out_traces, dpi=130)
+    fig2.savefig(out_traces)
     print(f"Saved {out_traces}")
+
+    # ---------- wandb ----------
+    run = init_wandb(args, job_type="survival", config={
+        "sweep_root": args.sweep_root,
+        "vqvae_dir": args.vqvae_dir,
+        "threshold_factor": args.threshold_factor,
+        "probe_step": args.probe_step,
+        "window": args.window,
+        "n_frames": n_frames,
+        "n_cfgs": len(cfgs),
+    })
+    scalars = {
+        "vqvae_emd": vqvae_emd,
+        "threshold_emd": threshold,
+    }
+    for cfg in cfgs:
+        info = results["configs"][cfg]
+        scalars[f"survival/{cfg}/survival_at_end"] = info["survival_at_end"]
+        scalars[f"survival/{cfg}/median_t"] = info["median_t"]
+        scalars[f"survival/{cfg}/survived"] = info["survived"]
+    wandb_log_figs_and_scalars(
+        run,
+        scalars=scalars,
+        figs={"survival_curves": fig, "emd_traces": fig2},
+        line_series={
+            "survival_vs_t": (ts, survival_curves, "rollout step t",
+                              "Survival S(t) per cfg"),
+        },
+    )
 
 
 if __name__ == "__main__":
