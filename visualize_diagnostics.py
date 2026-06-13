@@ -22,10 +22,22 @@ Figures (written to --output_dir, default <sweep_root>/visual):
                              EMD); cols = rollout times (GPU decode)
   5. highk_energy.png      — time-resolved high-k TKE band energy vs t per
                              temp, with GT and VQ-recon reference bands
-                             (GPU decode; this is the diffuse-attractor
+                             (decode; this is the diffuse-attractor
                              mechanism made visible)
+  6. temperature_selection.png — quantitative "which T" selector: late-window
+                             pixel-EMD vs T (primary, no decode) + time-avg
+                             E(k) overlay, high-k/GT ratio, pixel-PDF
+                             Wasserstein, spectral RSE. Best T flagged; high-k
+                             ratio ~1 separates genuine restoration from
+                             high-T noise. Per-T metrics also logged as wandb
+                             scalars (select/<cfg>/...).
 
-CPU-only figures 1-3 run anywhere (login node OK) with --skip_decode.
+Figures 1-3 and the EMD-only form of figure 6 need NO decode — they run on a
+login node with --skip_decode. The decode-backed figures (4, 5, full 6) run
+on GPU *or* CPU; JAX uses whatever device is present (slower on CPU but a
+single decode pass feeds figures 5 and 6). For a CPU-only node set
+JAX_PLATFORMS=cpu and keep the decode budget modest (--spectra_stride 100
+--n_traj_spectra 2); see scripts/bridges/submit_visualize.sh --cpu.
 
 Batch submission (one 1-GPU job per model, figures also logged to wandb):
   ./scripts/bridges/submit_visualize.sh [--model sc1941] [--dry-run]
@@ -285,56 +297,82 @@ def fig_snapshots(args, cfgs, metas, surv_npz, decode_fn, gt, output_dir):
     return fig
 
 
-def fig_highk_energy(args, cfgs, styles, metas, decode_fn, gt, output_dir):
-    """Time-resolved high-k TKE band energy per temp — the diffuse-attractor
-    mechanism: spectral collapse shows up as this trace decaying."""
-    from analyze_rollout import compute_tke_spectrum, setup_spectral_analysis
+def _subsample(arr, n, seed=0):
+    arr = np.asarray(arr).ravel()
+    if arr.size <= n:
+        return arr
+    rng = np.random.default_rng(seed)
+    return rng.choice(arr, n, replace=False)
 
+
+def compute_decoded_stats(args, cfgs, decode_fn, gt, n_pix=200_000):
+    """Single decode pass per cfg -> spectra + pixel pools, shared by the
+    high-k and temperature-selection figures (one decode pass total — the
+    only GPU/CPU-heavy step). Decodes args.n_traj_spectra trajectories every
+    args.spectra_stride frames; references decode GT-token VQ recon + raw GT.
+    """
+    from analyze_rollout import (compute_tke_spectrum,
+                                 setup_spectral_analysis)
     H, W = gt.shape[-2:]
     Kx, Ky, Ksq, k_centers, bin_masks = setup_spectral_analysis(H, W)
     n_bins = len(k_centers)
     band = slice(int(n_bins * (1.0 - args.highk_frac)), n_bins)
 
-    def band_energy(fields):
-        # fields: (T, H, W) -> (T,) high-k band TKE
-        return np.array([
-            compute_tke_spectrum(f, Kx, Ky, Ksq, bin_masks)[band].sum()
-            for f in fields
-        ])
+    def spectra(fields):                       # (T,H,W) -> (T, n_bins)
+        return np.stack([compute_tke_spectrum(f, Kx, Ky, Ksq, bin_masks)
+                         for f in fields])
 
-    n_frames = gt.shape[0]
-    probes = np.arange(0, n_frames, args.spectra_stride)
+    probes = np.arange(0, gt.shape[0], args.spectra_stride)
 
-    # GT + VQ recon references.
-    gt_be = band_energy(gt[probes, 0])
+    gt_spec_t = spectra(gt[probes, 0])
     first = load_rollout_tokens(
         os.path.join(args.sweep_root, cfgs[0], "rollout"))
-    print("decoding VQ recon for high-k reference...")
-    vq_fields = decode_fn(first["gt_indices"][0][probes])
-    vq_be = band_energy(vq_fields[:, 0])
+    print("decoding VQ recon reference...")
+    vq_fields = decode_fn(first["gt_indices"][0][probes])[:, 0]
+    vq_spec_t = spectra(vq_fields)
 
-    fig, ax = plt.subplots(figsize=(12, 6), constrained_layout=True)
-    ax.plot(probes, gt_be, color="k", lw=1.5, label="GT")
-    ax.plot(probes, vq_be, color="0.5", lw=1.5, ls=":",
-            label="VQ recon (codebook ceiling)")
-
+    stats = {}
     for cfg in cfgs:
-        d = load_rollout_tokens(os.path.join(args.sweep_root, cfg, "rollout"))
-        idx = d["rollout_indices"]                       # (N, T+1, P)
+        idx = load_rollout_tokens(
+            os.path.join(args.sweep_root, cfg, "rollout"))["rollout_indices"]
         n_traj = min(args.n_traj_spectra, idx.shape[0])
-        bes = []
         print(f"decoding {cfg} ({n_traj} traj x {len(probes)} probes)...")
+        sp, pix = [], []
         for j in range(n_traj):
-            fields = decode_fn(idx[j][probes])
-            bes.append(band_energy(fields[:, 0]))
-        med = safe_median(np.stack(bes), axis=0)
-        ax.plot(probes, med, lw=1.8, color=styles[cfg]["color"],
-                ls=styles[cfg]["ls"],
-                label=f"{cfg} [{describe_decode(metas[cfg])}]")
+            f = decode_fn(idx[j][probes])[:, 0]
+            sp.append(spectra(f))
+            pix.append(f.ravel())
+        sp = np.stack(sp)                       # (n_traj, T, n_bins)
+        stats[cfg] = {
+            "highk_t": np.median(sp[..., band].sum(-1), axis=0),  # (T,)
+            "avg_spec": sp.mean(axis=(0, 1)),                     # (n_bins,)
+            "pix": _subsample(np.concatenate(pix), n_pix),
+        }
+    return {
+        "probes": probes, "k_centers": k_centers, "band": band,
+        "gt_avg_spec": gt_spec_t.mean(0), "vq_avg_spec": vq_spec_t.mean(0),
+        "gt_highk_t": gt_spec_t[:, band].sum(1),
+        "vq_highk_t": vq_spec_t[:, band].sum(1),
+        "gt_pix": _subsample(gt[probes, 0], n_pix),
+        "stats": stats,
+    }
 
+
+def fig_highk_energy(decoded, cfgs, styles, metas, highk_frac, output_dir):
+    """Time-resolved high-k TKE band energy per temp — the diffuse-attractor
+    mechanism: spectral collapse shows up as this trace decaying."""
+    probes = decoded["probes"]
+    fig, ax = plt.subplots(figsize=(12, 6), constrained_layout=True)
+    ax.plot(probes, decoded["gt_highk_t"], color="k", lw=1.5, label="GT")
+    ax.plot(probes, decoded["vq_highk_t"], color="0.5", lw=1.5, ls=":",
+            label="VQ recon (codebook ceiling)")
+    for cfg in cfgs:
+        ax.plot(probes, decoded["stats"][cfg]["highk_t"], lw=1.8,
+                color=styles[cfg]["color"], ls=styles[cfg]["ls"],
+                label=f"{cfg} [{describe_decode(metas[cfg])}]")
     ax.set_yscale("log")
     ax.set_xlabel("rollout step t")
-    ax.set_ylabel(f"high-k TKE (top {args.highk_frac:.0%} of k bins)")
+    ax.set_ylabel(f"high-k TKE (top {highk_frac:.0%} of k bins)")
     ax.set_title("Time-resolved high-k energy — diffusive collapse = decay "
                  "toward the smooth attractor")
     outside_legend(ax)
@@ -342,6 +380,142 @@ def fig_highk_energy(args, cfgs, styles, metas, decode_fn, gt, output_dir):
     fig.savefig(out)
     print(f"saved {out}")
     return fig
+
+
+def late_emd(surv_npz, cfg, frac=0.5):
+    """Median over trajectories of the late-window (t > frac*T) mean
+    windowed pixel-EMD vs GT — the threshold-free drift magnitude."""
+    emd = surv_npz[f"emd_{cfg}"]
+    pt = np.asarray(surv_npz["probe_times"])
+    late = pt > pt.max() * frac
+    return float(np.median(emd[:, late].mean(axis=1)))
+
+
+def fig_temperature_selection(cfgs, styles, metas, surv_npz, diag, decoded,
+                              output_dir):
+    """Quantitative 'which temperature' selector — replaces eyeballing.
+
+    Primary metric = late-window pixel-EMD vs GT (already in survival_data,
+    needs NO decode, so this figure renders on a login node with
+    --skip_decode). With decoded stats it adds the time-averaged E(k) overlay
+    plus high-k/GT ratio, pixel-PDF Wasserstein, and spectral RSE vs T, so the
+    optimum is read off curves. Best T is flagged by min pixel-EMD; the
+    high-k ratio (~1 = GT) marks the genuine-restoration vs noise-overshoot
+    boundary that distinguishes a real optimum from high-T noise gaming.
+
+    Returns (fig, scalars).
+    """
+    from scipy.stats import wasserstein_distance
+    temps = np.array([metas[c].get("temperature") or np.nan for c in cfgs])
+
+    emd_vals = np.array([late_emd(surv_npz, c) for c in cfgs])
+    best_i = int(np.nanargmin(emd_vals))
+    best_T = temps[best_i]
+
+    scalars = {"best_T_pixel_emd": float(best_T)}
+    for c, e in zip(cfgs, emd_vals):
+        scalars[f"select/{c}/late_pixel_emd"] = float(e)
+
+    if decoded is None:
+        # EMD-only ranking (+ final entropy if logits present) — zero decode.
+        cols = 2 if diag else 1
+        fig, axes = plt.subplots(1, cols, figsize=(6.5 * cols, 4.5),
+                                 constrained_layout=True, squeeze=False)
+        ax = axes[0, 0]
+        ax.plot(temps, emd_vals, "-o", color="0.3")
+        ax.plot(best_T, emd_vals[best_i], "*", ms=18, color="C3",
+                label=f"best T={best_T:g}")
+        ax.set_xlabel("temperature")
+        ax.set_ylabel("late pixel-EMD vs GT")
+        ax.set_title("Pixel-EMD vs temperature (lower = better)")
+        ax.legend()
+        if diag:
+            ax = axes[0, 1]
+            ent = np.array([
+                np.nanmedian(diag[c]["frame_entropy"][:, -200:])
+                if c in diag else np.nan for c in cfgs])
+            ax.plot(temps, ent, "-o", color="0.3")
+            ax.set_xlabel("temperature")
+            ax.set_ylabel("late-window entropy (nats)")
+            ax.set_title("Final entropy vs temperature")
+        fig.suptitle(f"Temperature selection (EMD-only) — best T={best_T:g}")
+        out = os.path.join(output_dir, "temperature_selection.png")
+        fig.savefig(out)
+        print(f"saved {out}")
+        return fig, scalars
+
+    # Full version with decoded spectra + PDF.
+    kc = decoded["k_centers"]
+    band = decoded["band"]
+    gt_spec = decoded["gt_avg_spec"]
+    vq_spec = decoded["vq_avg_spec"]
+    gt_hk = gt_spec[band].sum()
+    gt_pix = decoded["gt_pix"]
+
+    hk_ratio, pdf_w, spec_rse = [], [], []
+    for c in cfgs:
+        s = decoded["stats"][c]
+        hk_ratio.append(s["avg_spec"][band].sum() / gt_hk)
+        pdf_w.append(wasserstein_distance(s["pix"], gt_pix))
+        spec_rse.append(np.linalg.norm(s["avg_spec"] - gt_spec)
+                        / (np.linalg.norm(gt_spec) + 1e-12))
+    hk_ratio = np.array(hk_ratio)
+    pdf_w = np.array(pdf_w)
+    spec_rse = np.array(spec_rse)
+    for c, r, w, rse in zip(cfgs, hk_ratio, pdf_w, spec_rse):
+        scalars[f"select/{c}/highk_ratio_to_gt"] = float(r)
+        scalars[f"select/{c}/pdf_wasserstein"] = float(w)
+        scalars[f"select/{c}/spectral_rse"] = float(rse)
+
+    fig = plt.figure(figsize=(17, 7), constrained_layout=True)
+    sub = fig.subfigures(1, 2, width_ratios=[1.15, 1])
+    axL = sub[0].subplots(1, 1)
+    axL.loglog(kc, gt_spec, color="k", lw=2.0, label="GT")
+    axL.loglog(kc, vq_spec, color="0.5", lw=1.6, ls=":",
+               label="VQ recon (ceiling)")
+    for c in cfgs:
+        axL.loglog(kc, decoded["stats"][c]["avg_spec"], lw=1.4,
+                   color=styles[c]["color"], ls=styles[c]["ls"],
+                   label=f"{c} [{describe_decode(metas[c])}]")
+    axL.axvspan(kc[band][0], kc[-1], color="0.85", alpha=0.5, zorder=0)
+    axL.set_xlabel("wavenumber k")
+    axL.set_ylabel("time-averaged E(k)")
+    axL.set_title("Time-averaged TKE spectrum vs GT (shaded = high-k band)")
+    outside_legend(axL)
+
+    axes = sub[1].subplots(2, 2)
+
+    def metric_vs_t(ax, vals, ylabel, title, hline=None, best="min"):
+        ax.plot(temps, vals, "-o", color="0.3")
+        if best == "min":
+            bi = int(np.nanargmin(vals))
+        else:                                  # closest to hline
+            bi = int(np.nanargmin(np.abs(vals - hline)))
+        ax.plot(temps[bi], vals[bi], "*", ms=15, color="C3")
+        if hline is not None:
+            ax.axhline(hline, color="C0", ls="--", lw=1, label="GT match")
+            ax.legend(fontsize=8)
+        ax.set_xlabel("temperature")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title, fontsize=10)
+
+    metric_vs_t(axes[0, 0], emd_vals, "late pixel-EMD",
+                "Pixel-EMD (primary, lower=better)")
+    metric_vs_t(axes[0, 1], pdf_w, "Wasserstein", "Pixel-PDF distance")
+    metric_vs_t(axes[1, 0], hk_ratio, "E_T(hi-k)/E_GT",
+                "High-k ratio (1=GT, >1=noise)", hline=1.0, best="near")
+    metric_vs_t(axes[1, 1], spec_rse, "spectral RSE", "Spectral RSE")
+
+    hk_at_best = float(hk_ratio[best_i])
+    note = ("high-k drained" if hk_at_best < 0.8 else
+            "noise overshoot" if hk_at_best > 1.5 else "GT-matched")
+    scalars["best_T_highk_ratio"] = hk_at_best
+    fig.suptitle(f"Temperature selection — best by pixel-EMD: T={best_T:g} "
+                 f"(high-k ratio {hk_at_best:.2f}, {note})")
+    out = os.path.join(output_dir, "temperature_selection.png")
+    fig.savefig(out)
+    print(f"saved {out}")
+    return fig, scalars
 
 
 # =============================================================================
@@ -381,6 +555,7 @@ def main():
                           "per_scale_entropy", "scales")}
 
     figs = {}
+    scalars = {}
 
     # ---- CPU figures ----
     if surv_npz is not None:
@@ -393,7 +568,7 @@ def main():
         figs["logit_traces"] = fig_logit_traces(
             cfgs, styles, metas, diag, output_dir, args.ema)
 
-    # ---- GPU figures ----
+    # ---- decode-backed figures (run on GPU or CPU; CPU just slower) ----
     if not args.skip_decode:
         if not (args.vqvae_dir and args.data_path):
             raise SystemExit(
@@ -403,6 +578,7 @@ def main():
         from tokenizer import load_checkpoint
         import jax.numpy as jnp
 
+        print(f"JAX devices: {jax.devices()}")
         print("Loading VQ-VAE...")
         key = jax.random.PRNGKey(0)
         _, decoder, vq, ema_state, _ = load_checkpoint(args.vqvae_dir, key)
@@ -427,8 +603,24 @@ def main():
         if surv_npz is not None:
             figs["snapshots"] = fig_snapshots(
                 args, cfgs, metas, surv_npz, decode_fn, gt, output_dir)
+
+        # One decode pass feeds both high-k and the temperature selector.
+        decoded = compute_decoded_stats(args, cfgs, decode_fn, gt)
         figs["highk_energy"] = fig_highk_energy(
-            args, cfgs, styles, metas, decode_fn, gt, output_dir)
+            decoded, cfgs, styles, metas, args.highk_frac, output_dir)
+        if surv_npz is not None:
+            figs["temperature_selection"], scalars = fig_temperature_selection(
+                cfgs, styles, metas, surv_npz, diag, decoded, output_dir)
+    elif surv_npz is not None:
+        # CPU/login-node ranking: pixel-EMD vs T, no decode.
+        figs["temperature_selection"], scalars = fig_temperature_selection(
+            cfgs, styles, metas, surv_npz, diag, None, output_dir)
+
+    if "best_T_pixel_emd" in scalars:
+        print(f"\n>>> best temperature by pixel-EMD: "
+              f"T={scalars['best_T_pixel_emd']:g}"
+              + (f"  (high-k ratio {scalars['best_T_highk_ratio']:.2f})"
+                 if "best_T_highk_ratio" in scalars else ""))
 
     # ---- wandb ----
     run = init_wandb(args, job_type="visual", config={
@@ -439,7 +631,7 @@ def main():
         "n_traj_spectra": args.n_traj_spectra,
         "highk_frac": args.highk_frac,
     })
-    wandb_log_figs_and_scalars(run, figs=figs)
+    wandb_log_figs_and_scalars(run, scalars=scalars, figs=figs)
     print(f"\nDone — {len(figs)} figures in {output_dir}")
 
 

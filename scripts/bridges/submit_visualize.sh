@@ -1,5 +1,5 @@
 #!/bin/bash
-# Batch submitter for visualize_diagnostics.py — one 1-GPU job per model,
+# Batch submitter for visualize_diagnostics.py — one job per model,
 # figures land in <sweep_root>/visual/ AND in wandb
 # (gust2-diagnostics-bridges, group <run>-posmask-temp, job_type=visual).
 #
@@ -8,8 +8,14 @@
 # and per-cfg logits/diagnostics.npz for the full figure set; missing
 # pieces are skipped gracefully by the script itself).
 #
+# --cpu runs on RM-shared (no GPU) with JAX_PLATFORMS=cpu and a lighter
+# decode budget (stride 100, 2 traj). The decode is slower on CPU but the
+# whole figure set still renders; the temperature-selection primary metric
+# (pixel-EMD) and figures 1-3 need no decode at all.
+#
 # Usage:
-#   ./scripts/bridges/submit_visualize.sh              # all 3 models
+#   ./scripts/bridges/submit_visualize.sh              # all 3 models, GPU
+#   ./scripts/bridges/submit_visualize.sh --cpu        # all 3 models, CPU node
 #   ./scripts/bridges/submit_visualize.sh --model sc1941
 #   ./scripts/bridges/submit_visualize.sh --dry-run
 
@@ -42,15 +48,18 @@ MODELS=(
 # ---------- Parse args ----------
 DRY_RUN=false
 FILTER_MODEL=""
+CPU_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) DRY_RUN=true; shift ;;
+        --cpu) CPU_MODE=true; shift ;;
         --model) FILTER_MODEL="$2"; shift 2 ;;
         --help|-h)
             cat <<EOF
-Usage: $0 [--model <substr>] [--dry-run]
+Usage: $0 [--model <substr>] [--cpu] [--dry-run]
   --model <substr>   Filter models by substring (e.g. sc1941).
+  --cpu              Submit to RM-shared (CPU only) instead of GPU-shared.
   --dry-run          Print actions without submitting.
 EOF
             exit 0
@@ -58,6 +67,33 @@ EOF
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
+
+# ---------- Partition / resource selection ----------
+if [ "${CPU_MODE}" = true ]; then
+    PARTITION="RM-shared"
+    JOB_PREFIX="vizc"
+    WALLTIME="6:00:00"
+    RES_LINES="#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G"
+    # JAX_PLATFORMS=cpu forces CPU and skips CUDA init on a node with no GPU.
+    ENV_SETUP="export JAX_PLATFORMS=cpu"
+    VIZ_STRIDE=100
+    VIZ_NTRAJ=2
+else
+    PARTITION="GPU-shared"
+    JOB_PREFIX="viz"
+    WALLTIME="2:00:00"
+    RES_LINES="#SBATCH --gres=gpu:h100-80:1
+#SBATCH --exclude=w009"
+    ENV_SETUP='module load cuda/12.6.1
+NVIDIA_LIBS=$(python -c "import nvidia; print(nvidia.__path__[0])")
+export LD_LIBRARY_PATH=$(find $NVIDIA_LIBS -name "lib" -type d | tr "\n" ":"):${LD_LIBRARY_PATH:-}'
+    VIZ_STRIDE=${SPECTRA_STRIDE}
+    VIZ_NTRAJ=${N_TRAJ_SPECTRA}
+fi
+
+echo "Mode: ${PARTITION}  (stride=${VIZ_STRIDE}, n_traj=${VIZ_NTRAJ})"
 
 N_SUBMITTED=0
 
@@ -87,13 +123,12 @@ for spec in "${MODELS[@]}"; do
     TMPFILE="$(mktemp /tmp/diagviz_${RUN_NAME}_XXXXXX.sbatch)"
     cat > "${TMPFILE}" << SBATCH_EOF
 #!/bin/bash
-#SBATCH -J viz-${RUN_NAME}
+#SBATCH -J ${JOB_PREFIX}-${RUN_NAME}
 #SBATCH -A ${ACCOUNT}
-#SBATCH -p GPU-shared
+#SBATCH -p ${PARTITION}
 #SBATCH -N 1
-#SBATCH --gres=gpu:h100-80:1
-#SBATCH --exclude=w009
-#SBATCH -t 2:00:00
+${RES_LINES}
+#SBATCH -t ${WALLTIME}
 #SBATCH -o ${LOG_DIR}/${RUN_NAME}-visual-%j.out
 #SBATCH -e ${LOG_DIR}/${RUN_NAME}-visual-%j.err
 
@@ -101,16 +136,13 @@ set -euo pipefail
 
 cd "${REPODIR}"
 source "${OCEAN}/.venvs/gust/bin/activate"
-module load cuda/12.6.1
-
-NVIDIA_LIBS=\$(python -c "import nvidia; print(nvidia.__path__[0])")
-export LD_LIBRARY_PATH=\$(find \$NVIDIA_LIBS -name "lib" -type d | tr '\\n' ':'):\${LD_LIBRARY_PATH:-}
+${ENV_SETUP}
 
 echo "=========================================="
 echo "Job:          \${SLURM_JOB_ID}"
 echo "Node:         \$(hostname)"
 echo "Started:      \$(date)"
-echo "Run:          ${RUN_NAME} visualization"
+echo "Run:          ${RUN_NAME} visualization (${PARTITION})"
 echo "Sweep root:   ${SWEEP_ROOT}"
 echo "Wandb:        ${WANDB_PROJECT} / group=${WANDB_GROUP} / ${WANDB_GROUP}-visual"
 echo "=========================================="
@@ -121,8 +153,8 @@ python visualize_diagnostics.py \\
     --data_path "${DATA_PATH}" \\
     --batch_size ${BATCH_SIZE} \\
     --snap_times "${SNAP_TIMES}" \\
-    --spectra_stride ${SPECTRA_STRIDE} \\
-    --n_traj_spectra ${N_TRAJ_SPECTRA} \\
+    --spectra_stride ${VIZ_STRIDE} \\
+    --n_traj_spectra ${VIZ_NTRAJ} \\
     --wandb_project ${WANDB_PROJECT} \\
     --wandb_group "${WANDB_GROUP}" \\
     --wandb_name "${WANDB_GROUP}-visual" \\
@@ -132,7 +164,7 @@ echo "Finished:     \$(date)"
 SBATCH_EOF
 
     if [ "${DRY_RUN}" = true ]; then
-        echo "[dry-run] visualize ${RUN_NAME}  -> ${SWEEP_ROOT}/visual"
+        echo "[dry-run] visualize ${RUN_NAME} (${PARTITION})  -> ${SWEEP_ROOT}/visual"
     else
         echo "Submitting visualize ${RUN_NAME}..."
         JOBID=$(sbatch --parsable "${TMPFILE}")
