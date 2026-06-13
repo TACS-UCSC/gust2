@@ -73,9 +73,11 @@ if [ "${CPU_MODE}" = true ]; then
     PARTITION="RM-shared"
     JOB_PREFIX="vizc"
     WALLTIME="6:00:00"
-    RES_LINES="#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G"
+    # Bridges2 RM-shared: request cores with --ntasks-per-node (max 64);
+    # memory is fixed at 2 GB/core (--mem is NOT honored), so 16 cores =>
+    # 32 GB, ample for the decode + pixel pools. The single python process
+    # (not srun-wrapped) uses all allocated cores for JAX's CPU threadpool.
+    RES_LINES="#SBATCH --ntasks-per-node=16"
     # JAX_PLATFORMS=cpu forces CPU and skips CUDA init on a node with no GPU.
     ENV_SETUP="export JAX_PLATFORMS=cpu"
     VIZ_STRIDE=100
