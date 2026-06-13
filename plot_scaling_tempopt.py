@@ -14,9 +14,10 @@ Figures -> --output_dir (default plots/scaling_tempopt/):
                       model size / VQ tier? (justifies / refutes T transfer)
   scaling_tempopt.csv   per-cell best T + metrics
 
-Run locally after the sweep's analysis runs have logged to wandb:
+Reads the 3 per-VQ-tier projects gust2-scaling-tempopt-{small,medium,large}
+by default. Run locally after the sweep's analysis runs have logged:
   ~/llm/bin/python plot_scaling_tempopt.py
-  ~/llm/bin/python plot_scaling_tempopt.py --project gust2-analysis-bridges-scaling  # smoke test on old single-T data
+  ~/llm/bin/python plot_scaling_tempopt.py --projects gust2-analysis-bridges-scaling  # smoke test on old single-T data
 """
 import argparse
 import csv
@@ -67,13 +68,21 @@ def parse_run_name(name):
     return size, sc, arch, temp
 
 
-def fetch(project, entity):
+def fetch(projects, entity):
     """Return per-cell best-T record:
     table[(size, sc, arch)] = {params_M, best_T, emd, tke, ens, emd_vq, n_T}
-    best T chosen by min pixel-EMD (emd/nsp)."""
+    best T chosen by min pixel-EMD (emd/nsp). Reads across one or more wandb
+    projects (the per-VQ-tier scaling-tempopt projects)."""
     api = wandb.Api()
-    runs = list(api.runs(f"{entity}/{project}"))
-    print(f"{project}: {len(runs)} runs")
+    runs = []
+    for project in projects:
+        try:
+            pr = list(api.runs(f"{entity}/{project}"))
+        except ValueError:
+            print(f"[warn] project {project} not found, skipping")
+            continue
+        print(f"{project}: {len(pr)} runs")
+        runs += pr
 
     # collect per (cell, T)
     per_cell = defaultdict(list)            # (size,sc,arch) -> [(T, metrics)]
@@ -188,13 +197,16 @@ def write_csv(table, out):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--project", default="gust2-scaling-tempopt-bridges")
+    p.add_argument("--projects", nargs="+",
+                   default=[f"gust2-scaling-tempopt-{s}" for s in SIZES],
+                   help="wandb project(s) to read (default: the 3 per-tier "
+                        "scaling-tempopt projects)")
     p.add_argument("--entity", default=ENTITY)
     p.add_argument("--output_dir", default="plots/scaling_tempopt")
     args = p.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
-    table = fetch(args.project, args.entity)
+    table = fetch(args.projects, args.entity)
     if not table:
         raise SystemExit("No cells with metrics found.")
 

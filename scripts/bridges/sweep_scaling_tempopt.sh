@@ -35,7 +35,9 @@ AR_BASE="${OCEAN}/experiments/ar-robust-scaling"
 TEMPOPT_BASE="${OCEAN}/experiments/scaling-tempopt"
 WANDB_BASE="${OCEAN}/wandb"
 ACCOUNT="mth260004p"
-WANDB_PROJECT="gust2-scaling-tempopt-bridges"
+# One wandb project per VQ-VAE tier (browsable): gust2-scaling-tempopt-{size}.
+# Within each, group = sc-config, run = <cell>-T<temp>.
+WANDB_PROJECT_PREFIX="gust2-scaling-tempopt"
 
 # ---------- Rollout / analysis config ----------
 N_STEPS=2000
@@ -55,11 +57,14 @@ temps_for() {
         *) echo "" ;;
     esac
 }
+# Rollout+analyze is fast on an H100; 5 temps fit in ~1h for sc341/sc917.
+# sc1941 (5.7x the tokens/frame + heavier decode) gets 2h headroom. A timeout
+# is harmless anyway — the per-temp metrics.json skip lets a resubmit resume.
 walltime_for() {
     case "$1" in
-        sc341|sc917) echo "8:00:00" ;;
-        sc1941)      echo "16:00:00" ;;
-        *)           echo "8:00:00" ;;
+        sc341|sc917) echo "1:00:00" ;;
+        sc1941)      echo "2:00:00" ;;
+        *)           echo "1:00:00" ;;
     esac
 }
 
@@ -134,7 +139,7 @@ if [ "${LIST_ONLY}" = true ]; then
     done
     echo "  Cells (jobs): ${n_cells}  (sizes: ${SIZES[*]})"
     echo "  Rollouts:     ${n_cells} × 5 temps = $((n_cells * 5))"
-    echo "  Wandb:        ${WANDB_PROJECT}, group=<size>-<sc>, run=<cell>-T<temp>"
+    echo "  Wandb:        ${WANDB_PROJECT_PREFIX}-{small,medium,large}, group=<sc>, run=<cell>-T<temp>"
     exit 0
 fi
 
@@ -143,7 +148,7 @@ echo "Temperature-optimal scaling sweep"
 echo "  Sizes:         ${SIZES[*]}"
 echo "  posmask:       ON   N_traj: ${N_TRAJ}   steps: ${N_STEPS}"
 echo "  Output base:   ${TEMPOPT_BASE}"
-echo "  Wandb project: ${WANDB_PROJECT}"
+echo "  Wandb:         ${WANDB_PROJECT_PREFIX}-{small,medium,large}"
 echo "  Dry run:       ${DRY_RUN}"
 echo "=========================================="
 
@@ -169,7 +174,8 @@ for SIZE in "${SIZES[@]}"; do
         VQVAE_DIR="${VQVAE_BASE}/${VQVAE_NAME}"
         CELL_DIR="${TEMPOPT_BASE}/${RUN_NAME}"
         LOG_DIR="${TEMPOPT_BASE}/logs"
-        WANDB_GROUP="${VQVAE_NAME}"
+        WANDB_PROJECT="${WANDB_PROJECT_PREFIX}-${SIZE}"
+        WANDB_GROUP="${SC}"
         TEMPS="$(temps_for ${SC})"
         WALLTIME="$(walltime_for ${SC})"
 
