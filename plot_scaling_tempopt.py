@@ -36,6 +36,19 @@ SCS = ["sc341", "sc917", "sc1941"]
 VQVAE_PARAMS_M = {"small": 31.0, "medium": 57.0, "large": 109.0}
 SC_COLOR = {"sc341": "C0", "sc917": "C1", "sc1941": "C2"}
 
+# (sc, arch) -> NSP layer count, from the sweep grid. The grid trades depth
+# for width to hit each param target, so points at similar params can be very
+# differently shaped; the shallow-wide ones (s09=1L, s74=3L/1024) are the
+# suspected non-monotonicity drivers.
+ARCH_LAYERS = {
+    ("sc341", "s06"): 2, ("sc341", "s09"): 1, ("sc341", "s13"): 3,
+    ("sc341", "s18"): 6, ("sc341", "s24"): 4,
+    ("sc917", "s13"): 3, ("sc917", "s22"): 8, ("sc917", "s34"): 5,
+    ("sc917", "s50"): 9, ("sc917", "s74"): 3,
+    ("sc1941", "s31"): 4, ("sc1941", "s48"): 6, ("sc1941", "s73"): 7,
+    ("sc1941", "s113"): 6, ("sc1941", "s139"): 8,
+}
+
 
 def label_to_params_M(label):
     """NSP params in millions from the arch label (sNN -> NN). Canonical
@@ -111,25 +124,36 @@ def fetch(projects, entity):
             continue
         best_T, best = min(entries, key=lambda e: e[1]["emd"])
         table[cell] = {
-            "params_M": pm, "best_T": best_T, "n_T": len(entries), **best,
+            "params_M": pm, "best_T": best_T, "n_T": len(entries),
+            "n_layer": ARCH_LAYERS.get((sc, arch)), **best,
         }
     print(f"  -> {len(table)} cells with metrics")
     return table
 
 
-def _panel_lines(ax, table, size, metric, floor=False):
-    """One VQ-size panel: metric vs NSP params, a line per sc-config."""
+def _panel_lines(ax, table, size, metric, floor=False, min_layers=0,
+                 annotate=True, exclude=()):
+    """One VQ-size panel: metric vs NSP params, a line per sc-config.
+    Cells with n_layer < min_layers, or whose arch is in `exclude`, are
+    dropped; each point is annotated with its layer count."""
     for sc in SCS:
         pts = sorted(
-            [(v["params_M"], v[metric], v.get("emd_vq"))
+            [(v["params_M"], v[metric], v.get("emd_vq"), v.get("n_layer"))
              for (s, c, a), v in table.items()
-             if s == size and c == sc and v.get(metric) is not None],
+             if s == size and c == sc and v.get(metric) is not None
+             and (v.get("n_layer") or 0) >= min_layers and a not in exclude],
             key=lambda x: x[0])
         if not pts:
             continue
         x = np.array([p[0] for p in pts])
         y = np.array([p[1] for p in pts])
         ax.plot(x, y, "-o", color=SC_COLOR[sc], lw=1.8, ms=5, label=sc)
+        if annotate:
+            for px, py, _, nl in pts:
+                if nl is not None:
+                    ax.annotate(f"{nl}L", (px, py), fontsize=7,
+                                color=SC_COLOR[sc], xytext=(0, 5),
+                                textcoords="offset points", ha="center")
         if floor:
             vq = [p[2] for p in pts if p[2] is not None]
             if vq:
@@ -141,11 +165,13 @@ def _panel_lines(ax, table, size, metric, floor=False):
     ax.grid(True, alpha=0.3)
 
 
-def fig_metric_vs_params(table, metric, ylabel, title, out, floor=False):
+def fig_metric_vs_params(table, metric, ylabel, title, out, floor=False,
+                         min_layers=0, annotate=True, exclude=()):
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.6), sharey=True,
                              constrained_layout=True)
     for ax, size in zip(axes, SIZES):
-        _panel_lines(ax, table, size, metric, floor=floor)
+        _panel_lines(ax, table, size, metric, floor=floor,
+                     min_layers=min_layers, annotate=annotate, exclude=exclude)
     axes[0].set_ylabel(ylabel)
     axes[0].legend(title="token budget", fontsize=9)
     if floor:
@@ -203,7 +229,16 @@ def main():
                         "scaling-tempopt projects)")
     p.add_argument("--entity", default=ENTITY)
     p.add_argument("--output_dir", default="plots/scaling_tempopt")
+    p.add_argument("--min_layers", type=int, default=0,
+                   help="drop NSP archs shallower than this (e.g. 4 removes "
+                        "the shallow-wide s09/s74/... outliers)")
+    p.add_argument("--no_annotate", action="store_true",
+                   help="don't label points with layer count")
+    p.add_argument("--exclude", default="",
+                   help="comma-separated arch labels to drop (e.g. "
+                        "s09,s74,s139 — the shallow-wide / odd-head outliers)")
     args = p.parse_args()
+    exclude = tuple(a for a in args.exclude.split(",") if a)
     os.makedirs(args.output_dir, exist_ok=True)
 
     table = fetch(args.projects, args.entity)
@@ -219,14 +254,20 @@ def main():
               f"{v['best_T']:6.2f} {v['emd']:7.3f} "
               f"{tke if tke is None else round(tke,3):>6}")
 
+    suffix = f"  (n_layer >= {args.min_layers})" if args.min_layers else ""
     fig_metric_vs_params(
         table, "emd", "pixel-EMD vs GT (best T)",
-        "Scaling law: long-rollout pixel-EMD vs NSP size (temperature-optimal, posmask)",
-        os.path.join(args.output_dir, "scaling_emd.png"), floor=True)
+        "Scaling law: long-rollout pixel-EMD vs NSP size "
+        f"(temperature-optimal, posmask){suffix}",
+        os.path.join(args.output_dir, "scaling_emd.png"), floor=True,
+        min_layers=args.min_layers, annotate=not args.no_annotate,
+        exclude=exclude)
     fig_metric_vs_params(
         table, "tke", "TKE-RSE (best T)",
-        "Scaling law: TKE spectral RSE vs NSP size (temperature-optimal)",
-        os.path.join(args.output_dir, "scaling_tke.png"))
+        f"Scaling law: TKE spectral RSE vs NSP size (temperature-optimal){suffix}",
+        os.path.join(args.output_dir, "scaling_tke.png"),
+        min_layers=args.min_layers, annotate=not args.no_annotate,
+        exclude=exclude)
     fig_best_temperature(
         table, os.path.join(args.output_dir, "best_temperature.png"))
     write_csv(table, os.path.join(args.output_dir, "scaling_tempopt.csv"))
