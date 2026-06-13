@@ -26,11 +26,11 @@ Figures (written to --output_dir, default <sweep_root>/visual):
                              mechanism made visible)
   6. temperature_selection.png — quantitative "which T" selector: late-window
                              pixel-EMD vs T (primary, no decode) + time-avg
-                             E(k) overlay, high-k/GT ratio, pixel-PDF
+                             E(k) overlay, high-k/VQ-recon ratio, pixel-PDF
                              Wasserstein, spectral RSE. Best T flagged; high-k
-                             ratio ~1 separates genuine restoration from
-                             high-T noise. Per-T metrics also logged as wandb
-                             scalars (select/<cfg>/...).
+                             ratio ~1 (the codebook ceiling) separates genuine
+                             restoration from high-T noise. Per-T metrics also
+                             logged as wandb scalars (select/<cfg>/...).
 
 Figures 1-3 and the EMD-only form of figure 6 need NO decode — they run on a
 login node with --skip_decode. The decode-backed figures (4, 5, full 6) run
@@ -398,10 +398,11 @@ def fig_temperature_selection(cfgs, styles, metas, surv_npz, diag, decoded,
     Primary metric = late-window pixel-EMD vs GT (already in survival_data,
     needs NO decode, so this figure renders on a login node with
     --skip_decode). With decoded stats it adds the time-averaged E(k) overlay
-    plus high-k/GT ratio, pixel-PDF Wasserstein, and spectral RSE vs T, so the
-    optimum is read off curves. Best T is flagged by min pixel-EMD; the
-    high-k ratio (~1 = GT) marks the genuine-restoration vs noise-overshoot
-    boundary that distinguishes a real optimum from high-T noise gaming.
+    plus high-k/VQ-recon ratio, pixel-PDF Wasserstein, and spectral RSE vs T,
+    so the optimum is read off curves. Best T is flagged by min pixel-EMD; the
+    high-k ratio (~1 = the VQ-recon codebook ceiling, the achievable target)
+    marks the genuine-restoration vs noise-overshoot boundary that
+    distinguishes a real optimum from high-T noise gaming.
 
     Returns (fig, scalars).
     """
@@ -449,13 +450,19 @@ def fig_temperature_selection(cfgs, styles, metas, surv_npz, diag, decoded,
     band = decoded["band"]
     gt_spec = decoded["gt_avg_spec"]
     vq_spec = decoded["vq_avg_spec"]
-    gt_hk = gt_spec[band].sum()
+    # Reference the high-k ratio to the VQ recon, not GT: the codebook can't
+    # represent the top-k band (its own high-k is ~1% of GT), so vs-GT would
+    # peg every temperature near 0. vs-VQ-recon measures how well a rollout
+    # matches the *achievable* ceiling: ~1 = on the tokenizer's manifold,
+    # <1 = high-k drained (diffusive), >1 = noise injected above what the
+    # codebook can physically render.
+    vq_hk = vq_spec[band].sum()
     gt_pix = decoded["gt_pix"]
 
     hk_ratio, pdf_w, spec_rse = [], [], []
     for c in cfgs:
         s = decoded["stats"][c]
-        hk_ratio.append(s["avg_spec"][band].sum() / gt_hk)
+        hk_ratio.append(s["avg_spec"][band].sum() / (vq_hk + 1e-30))
         pdf_w.append(wasserstein_distance(s["pix"], gt_pix))
         spec_rse.append(np.linalg.norm(s["avg_spec"] - gt_spec)
                         / (np.linalg.norm(gt_spec) + 1e-12))
@@ -463,7 +470,7 @@ def fig_temperature_selection(cfgs, styles, metas, surv_npz, diag, decoded,
     pdf_w = np.array(pdf_w)
     spec_rse = np.array(spec_rse)
     for c, r, w, rse in zip(cfgs, hk_ratio, pdf_w, spec_rse):
-        scalars[f"select/{c}/highk_ratio_to_gt"] = float(r)
+        scalars[f"select/{c}/highk_ratio_to_vq"] = float(r)
         scalars[f"select/{c}/pdf_wasserstein"] = float(w)
         scalars[f"select/{c}/spectral_rse"] = float(rse)
 
@@ -493,7 +500,8 @@ def fig_temperature_selection(cfgs, styles, metas, surv_npz, diag, decoded,
             bi = int(np.nanargmin(np.abs(vals - hline)))
         ax.plot(temps[bi], vals[bi], "*", ms=15, color="C3")
         if hline is not None:
-            ax.axhline(hline, color="C0", ls="--", lw=1, label="GT match")
+            ax.axhline(hline, color="C0", ls="--", lw=1,
+                       label="VQ-recon ceiling")
             ax.legend(fontsize=8)
         ax.set_xlabel("temperature")
         ax.set_ylabel(ylabel)
@@ -502,13 +510,14 @@ def fig_temperature_selection(cfgs, styles, metas, surv_npz, diag, decoded,
     metric_vs_t(axes[0, 0], emd_vals, "late pixel-EMD",
                 "Pixel-EMD (primary, lower=better)")
     metric_vs_t(axes[0, 1], pdf_w, "Wasserstein", "Pixel-PDF distance")
-    metric_vs_t(axes[1, 0], hk_ratio, "E_T(hi-k)/E_GT",
-                "High-k ratio (1=GT, >1=noise)", hline=1.0, best="near")
+    metric_vs_t(axes[1, 0], hk_ratio, "E_T(hi-k)/E_VQ",
+                "High-k vs VQ-recon (1=ceiling, >1=noise)",
+                hline=1.0, best="near")
     metric_vs_t(axes[1, 1], spec_rse, "spectral RSE", "Spectral RSE")
 
     hk_at_best = float(hk_ratio[best_i])
     note = ("high-k drained" if hk_at_best < 0.8 else
-            "noise overshoot" if hk_at_best > 1.5 else "GT-matched")
+            "noise overshoot" if hk_at_best > 1.5 else "ceiling-matched")
     scalars["best_T_highk_ratio"] = hk_at_best
     fig.suptitle(f"Temperature selection — best by pixel-EMD: T={best_T:g} "
                  f"(high-k ratio {hk_at_best:.2f}, {note})")
