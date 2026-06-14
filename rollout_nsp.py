@@ -58,6 +58,29 @@ def parse_args():
                              "distribution = trajectory drifted off-manifold). "
                              "Output rank changes to (N, n_steps+1, "
                              "tokens_per_frame) when N > 1.")
+    parser.add_argument("--n_ics", type=int, default=0,
+                        help="Forecast mode: when > 0, roll out N=n_ics "
+                             "trajectories each starting from a DISTINCT "
+                             "ground-truth frame spread across the val set "
+                             "(short-horizon forecast skill), instead of N "
+                             "trajectories sharing one IC. Use with a short "
+                             "--n_steps (e.g. 10). All ICs share one seed "
+                             "(IC spread is the variable, not sampling "
+                             "noise). Mutually exclusive with "
+                             "--n_trajectories > 1.")
+    parser.add_argument("--ic_stride", type=int, default=0,
+                        help="Forecast mode IC spacing. 0 (default) spreads "
+                             "the n_ics ICs evenly across the usable val "
+                             "window; > 0 places them at frames "
+                             "0, ic_stride, 2*ic_stride, ... (clamped to the "
+                             "window).")
+    parser.add_argument("--ic_chunk", type=int, default=0,
+                        help="Forecast mode memory guard. 0 (default) runs "
+                             "the whole IC batch through one vmap'd forward "
+                             "per step; > 0 splits the IC axis into "
+                             "sub-batches of this size (bounds peak "
+                             "activation memory to ic_chunk ICs). Set ~32 "
+                             "for large configs (sc1941) at n_ics=128.")
     parser.add_argument("--output_dir", type=str, required=True,
                         help="Output directory")
     parser.add_argument("--seed", type=int, default=42)
@@ -212,31 +235,63 @@ def main():
     attn_bias = build_teacher_forced_mask(
         scales_t0, padded_t0, scales_t1, padded_t1)
 
-    # Validate start frame and n_steps. All trajectories share the same
-    # starting IC (args.start_frame); only the sampling seed varies. The
-    # rollout ensemble exposes sampling-noise variance at fixed IC, which
-    # is what we want for "blowup" measurement (EMD vs GT pixel distribution
-    # at the matching frames).
-    N = max(1, args.n_trajectories)
-    max_steps = len(indices) - args.start_frame - 1
-    if max_steps < 1:
-        raise ValueError(
-            f"Val window too short: {len(indices)} frames available, "
-            f"start_frame={args.start_frame} leaves {max_steps} GT steps."
-        )
-    if args.n_steps > max_steps:
-        print(f"  Clamped n_steps from {args.n_steps} to {max_steps} "
-              f"({len(indices)} val frames, start_frame={args.start_frame})")
-        args.n_steps = max_steps
-    max_start = len(indices) - args.n_steps - 1
-    if args.start_frame > max_start:
-        args.start_frame = max(0, max_start)
-        print(f"  Clamped start_frame to {args.start_frame}")
-
-    # All trajectories share the same start frame; seeds vary per trajectory.
-    start_frames = np.full(N, args.start_frame, dtype=np.int64)
-    trajectory_seeds = np.array(
-        [args.seed + i for i in range(N)], dtype=np.int64)
+    # Two launch modes:
+    #  (default) trajectory ensemble: N trajectories share one start frame
+    #    (args.start_frame); only the sampling seed varies. Exposes
+    #    sampling-noise variance at fixed IC (long-rollout blowup measure).
+    #  (forecast) IC ensemble (--n_ics > 0): N trajectories each start from a
+    #    DISTINCT ground-truth frame spread across the val set; all share one
+    #    seed. With a short --n_steps this measures free-running forecast skill
+    #    at lead times k, averaged over many ICs.
+    forecast_mode = args.n_ics > 0
+    if forecast_mode:
+        if args.n_trajectories > 1:
+            raise ValueError(
+                "--n_ics and --n_trajectories > 1 are mutually exclusive "
+                "(IC ensemble vs sampling ensemble). Pick one.")
+        # The last usable IC must leave room for +n_steps of GT lookahead.
+        max_start = len(indices) - args.n_steps - 1
+        if max_start < 0:
+            raise ValueError(
+                f"Val window too short: {len(indices)} frames available, "
+                f"n_steps={args.n_steps} leaves no room for an IC.")
+        if args.ic_stride > 0:
+            start_frames = (np.arange(args.n_ics) * args.ic_stride).astype(np.int64)
+            start_frames = start_frames[start_frames <= max_start]
+        else:
+            # Evenly spaced across [0, max_start], distinct (de-duped).
+            start_frames = np.unique(
+                np.linspace(0, max_start, args.n_ics).round().astype(np.int64))
+        N = len(start_frames)
+        if N < 1:
+            raise ValueError(
+                f"No valid ICs: n_ics={args.n_ics}, ic_stride={args.ic_stride}, "
+                f"max_start={max_start}.")
+        if N < args.n_ics:
+            print(f"  Clamped n_ics from {args.n_ics} to {N} distinct ICs "
+                  f"(max_start={max_start})")
+        # All ICs share one seed; IC spread is the variable of interest.
+        trajectory_seeds = np.full(N, args.seed, dtype=np.int64)
+    else:
+        # Validate start frame and n_steps; all trajectories share the IC.
+        N = max(1, args.n_trajectories)
+        max_steps = len(indices) - args.start_frame - 1
+        if max_steps < 1:
+            raise ValueError(
+                f"Val window too short: {len(indices)} frames available, "
+                f"start_frame={args.start_frame} leaves {max_steps} GT steps."
+            )
+        if args.n_steps > max_steps:
+            print(f"  Clamped n_steps from {args.n_steps} to {max_steps} "
+                  f"({len(indices)} val frames, start_frame={args.start_frame})")
+            args.n_steps = max_steps
+        max_start = len(indices) - args.n_steps - 1
+        if args.start_frame > max_start:
+            args.start_frame = max(0, max_start)
+            print(f"  Clamped start_frame to {args.start_frame}")
+        start_frames = np.full(N, args.start_frame, dtype=np.int64)
+        trajectory_seeds = np.array(
+            [args.seed + i for i in range(N)], dtype=np.int64)
 
     # JIT the generation function (temperature/top_k/top_p/log_topk
     # captured as closures so the static Python branches resolve at
@@ -263,6 +318,26 @@ def main():
         # else 3-tuple of (predicted, top_logits, top_indices).
         return jax.vmap(_generate_one)(t0_batch, keys_batch)
 
+    ic_chunk = args.ic_chunk
+
+    def generate_step_chunked(t0_batch, keys_batch):
+        # Split the IC/trajectory axis into sub-batches of ic_chunk to bound
+        # peak activation memory at large N (forecast mode, n_ics up to ~256
+        # on sc1941). generate_step_batched is jitted once per chunk shape and
+        # reused across sub-batches, so peak memory ~ ic_chunk, not N.
+        if ic_chunk <= 0 or t0_batch.shape[0] <= ic_chunk:
+            return generate_step_batched(t0_batch, keys_batch)
+        outs = [
+            generate_step_batched(t0_batch[s:s + ic_chunk],
+                                  keys_batch[s:s + ic_chunk])
+            for s in range(0, t0_batch.shape[0], ic_chunk)
+        ]
+        if log_topk > 0:
+            return tuple(
+                jnp.concatenate([o[j] for o in outs], axis=0)
+                for j in range(3))
+        return jnp.concatenate(outs, axis=0)
+
     # --- Rollout ---
     if temperature == 0.0:
         decode_desc = "greedy"
@@ -275,10 +350,15 @@ def main():
         decode_desc = ",".join(parts)
     if position_mask is not None:
         decode_desc += ",pos_mask"
-    print(f"\nRolling out {args.n_steps} steps, {N} trajector"
-          f"{'y' if N == 1 else 'ies'} "
-          f"(start_frames={start_frames.tolist()}, seeds="
-          f"{trajectory_seeds.tolist()}, {decode_desc})...")
+    if forecast_mode:
+        print(f"\nForecast rollout: {args.n_steps} steps x {N} ICs "
+              f"(spread {int(start_frames[0])}..{int(start_frames[-1])}, "
+              f"chunk={ic_chunk or N}, seed={args.seed}, {decode_desc})...")
+    else:
+        print(f"\nRolling out {args.n_steps} steps, {N} trajector"
+              f"{'y' if N == 1 else 'ies'} "
+              f"(start_frames={start_frames.tolist()}, seeds="
+              f"{trajectory_seeds.tolist()}, {decode_desc})...")
 
     # Initial (N, tokens_per_frame) batch and matching GT.
     t0_batch = jnp.array(indices[start_frames])
@@ -307,7 +387,7 @@ def main():
 
     for step in range(args.n_steps):
         keys_step = step_keys[:, step, :]     # (N, 2)
-        out = generate_step_batched(t0_batch, keys_step)
+        out = generate_step_chunked(t0_batch, keys_step)
         if log_topk > 0:
             t1_batch, top_logits_step, top_indices_step = out
             t1_batch.block_until_ready()
@@ -415,6 +495,10 @@ def main():
         "position_mask_used": bool(position_mask_np is not None),
         "checkpoint_dir": args.checkpoint_dir,
         "tokens_path": args.tokens_path,
+        "forecast_mode": bool(forecast_mode),
+        "n_ics": int(N) if forecast_mode else 0,
+        "ic_stride": int(args.ic_stride),
+        "start_frames": start_frames.tolist(),
     }
     cfg_meta_path = os.path.join(args.output_dir, "cfg_meta.json")
     with open(cfg_meta_path, "w") as f:
