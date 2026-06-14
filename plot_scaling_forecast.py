@@ -269,14 +269,36 @@ def main():
                         "(for the short-vs-long overlay); skipped if missing")
     p.add_argument("--output_dir", default="plots/scaling_forecast")
     p.add_argument("--no_annotate", action="store_true")
+    p.add_argument("--min_layers", type=int, default=0,
+                   help="drop NSP archs shallower than this (e.g. 4 removes "
+                        "the shallow-wide outliers s09/s74/s139)")
+    p.add_argument("--exclude", default="",
+                   help="comma-separated arch labels to drop (e.g. "
+                        "s09,s74,s139 — the odd depth/width/head shapes); "
+                        "matches plot_scaling_tempopt's clean/ version")
     args = p.parse_args()
     horizons = [int(x) for x in args.horizons.split(",") if x.strip()]
+    exclude = tuple(a for a in args.exclude.split(",") if a)
     os.makedirs(args.output_dir, exist_ok=True)
 
     tables = fetch_forecast(args.projects, args.entity, horizons)
     if not any(tables[k] for k in horizons):
         raise SystemExit("No cells with forecast metrics found.")
     lt = load_lt_csv(args.longterm_csv)
+
+    # Drop odd depth/width/head shapes uniformly across every figure + CSV so
+    # the forecast plots match plot_scaling_tempopt's --exclude / clean view.
+    if exclude or args.min_layers:
+        def keep(sc, arch, n_layer):
+            return arch not in exclude and (n_layer or 0) >= args.min_layers
+        for k in horizons:
+            tables[k] = {(s, c, a): v for (s, c, a), v in tables[k].items()
+                         if keep(c, a, v.get("n_layer"))}
+        if lt is not None:
+            lt = {(s, c, a): v for (s, c, a), v in lt.items()
+                  if keep(c, a, ARCH_LAYERS.get((c, a)))}
+        print(f"filter: exclude={exclude or '-'} min_layers={args.min_layers} "
+              f"-> {sum(len(tables[k]) for k in horizons)} cell-horizons kept")
 
     # Textual readout: forecast EMD per cell per horizon.
     print(f"\n{'cell':28s} " + " ".join(f"k{k:>2}_emd" for k in horizons))
