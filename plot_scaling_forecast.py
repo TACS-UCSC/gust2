@@ -176,6 +176,73 @@ def fig_overlay(tables, lt, horizons, metric, lt_key, ylabel, title, out):
     return fig
 
 
+def fig_per_family(tables, lt, horizons, metric, lt_key, ylabel, title, out,
+                   floor=False, annotate=False):
+    """One panel per (size, sc) model family; within each, a curve per lead
+    time k (metric vs NSP params), the long-run climate as a dashed black
+    reference, and (EMD only) the horizon-independent VQ-VAE floor. 3x3 grid,
+    sc rows x VQ-size cols, y shared per row. This is the transpose of the
+    per-horizon scaling_emd_k<k>.png figures: there a panel fixes k and varies
+    sc/size; here a panel fixes the family and overlays every k."""
+    fig, axes = plt.subplots(len(SCS), len(SIZES), figsize=(16, 13),
+                             sharex=False, sharey="row",
+                             constrained_layout=True)
+    hcolors = plt.cm.viridis(np.linspace(0.12, 0.88, len(horizons)))
+    for i, sc in enumerate(SCS):
+        for j, size in enumerate(SIZES):
+            ax = axes[i, j]
+            for hi, k in enumerate(horizons):
+                pts = sorted(
+                    [(v["params_M"], v[metric], v.get("n_layer"))
+                     for (s, c, a), v in tables[k].items()
+                     if s == size and c == sc and v.get(metric) is not None],
+                    key=lambda x: x[0])
+                if not pts:
+                    continue
+                ax.plot([p[0] for p in pts], [p[1] for p in pts], "-o",
+                        color=hcolors[hi], lw=1.7, ms=5, label=f"k={k}")
+                if annotate and hi == len(horizons) - 1:
+                    for px, py, nl in pts:
+                        if nl is not None:
+                            ax.annotate(f"{nl}L", (px, py), fontsize=6,
+                                        color="0.3", xytext=(0, 4),
+                                        textcoords="offset points", ha="center")
+            if lt is not None:
+                lp = sorted(
+                    [(v["params_M"], v[lt_key])
+                     for (s, c, a), v in lt.items()
+                     if s == size and c == sc
+                     and v.get(lt_key) is not None and v.get("params_M")],
+                    key=lambda x: x[0])
+                if lp:
+                    ax.plot([p[0] for p in lp], [p[1] for p in lp], "--s",
+                            color="black", lw=1.6, ms=4, alpha=0.85,
+                            label="long-run")
+            if floor:
+                vqs, seen = [], set()
+                for k in horizons:
+                    for (s, c, a), v in tables[k].items():
+                        if (s == size and c == sc and (s, c, a) not in seen
+                                and v.get("emd_vq") is not None):
+                            seen.add((s, c, a)); vqs.append(v["emd_vq"])
+                if vqs:
+                    ax.axhline(np.median(vqs), color="0.5", ls=":", lw=1,
+                               label="VQ floor")
+            ax.set_xscale("log")
+            ax.grid(True, alpha=0.3)
+            ax.set_title(f"{size}-{sc} ({VQVAE_PARAMS_M[size]:g}M VQ)",
+                         fontsize=10, color=SC_COLOR[sc])
+            if j == 0:
+                ax.set_ylabel(ylabel)
+            if i == len(SCS) - 1:
+                ax.set_xlabel("NSP params (M)")
+    axes[0, 0].legend(fontsize=8, ncol=2)
+    fig.suptitle(title, fontsize=13)
+    fig.savefig(out, dpi=130)
+    print(f"saved {out}")
+    return fig
+
+
 def write_csv(tables, horizons, out):
     with open(out, "w", newline="") as f:
         w = csv.writer(f)
@@ -250,6 +317,21 @@ def main():
         "Optimal temperature: short-horizon (k=1,2,5,10) vs long-run (black) "
         "— does the optimum diverge?",
         os.path.join(args.output_dir, "forecast_best_temperature.png"))
+
+    # (d) Per-family view: one panel per (size, sc), one curve per lead k
+    # (transpose of the per-horizon figures). Both metrics.
+    fig_per_family(
+        tables, lt, horizons, "emd", "emd_nsp", "pixel-EMD vs GT (best T)",
+        "Forecast EMD scaling per model family "
+        "(curve per lead k=1,2,5,10; long-run dashed; VQ floor dotted)",
+        os.path.join(args.output_dir, "family_scaling_emd.png"),
+        floor=True, annotate=not args.no_annotate)
+    fig_per_family(
+        tables, lt, horizons, "tke", "tke_rse", "TKE-RSE (best T)",
+        "Forecast TKE-RSE scaling per model family "
+        "(curve per lead k=1,2,5,10; long-run dashed)",
+        os.path.join(args.output_dir, "family_scaling_tke.png"),
+        annotate=not args.no_annotate)
 
     write_csv(tables, horizons,
               os.path.join(args.output_dir, "scaling_forecast.csv"))
