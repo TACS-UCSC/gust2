@@ -76,16 +76,16 @@ temps_for() {
         *) echo "" ;;
     esac
 }
-# N=128 is 32x the trajectory work of the N=4 sweep (which used 1-2h). The H100
-# absorbs much of that in parallel, but 5 temps x 2000 steps + analyze + survival
-# at N=128 needs real headroom. The per-temp metrics.json skip + survival_data
-# skip make any timeout resumable, so a resubmit always makes progress.
+# The H100 chews through N=128 batches in parallel: a full cell (5 temps x 2000
+# steps + analyze + survival) lands well under an hour. Tight walltimes also get
+# better GPU-shared queue priority; the per-temp metrics.json + survival_data
+# skips make any (unlikely) timeout fully resumable on resubmit.
 walltime_for() {
     case "$1" in
-        sc341)  echo "6:00:00"  ;;
-        sc917)  echo "12:00:00" ;;
-        sc1941) echo "20:00:00" ;;
-        *)      echo "12:00:00" ;;
+        sc341)  echo "0:30:00" ;;
+        sc917)  echo "0:45:00" ;;
+        sc1941) echo "1:00:00" ;;
+        *)      echo "1:00:00" ;;
     esac
 }
 
