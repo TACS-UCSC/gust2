@@ -16,10 +16,11 @@
 # For logit traces use the dedicated diagnostics sweep (sweep_diagnostics_temp.sh)
 # on the flagship models at N=12-25.
 #
-# Grid: 3 VQ sizes x 3 sc-configs x 5 NSP archs = 45 cells. One Slurm job per
-# cell, looping its config's 5-temp bracket internally, then survival. Honest
-# metrics land in wandb gust2-scaling-tempopt-n128-{small,medium,large},
-# group=<sc>, run=<cell>-T<temp> (+ <cell>-survival).
+# Grid: 3 VQ sizes x 3 sc-configs x 5 NSP archs = 45 cells. Fans out across the
+# queue: ONE Slurm job per (cell, temp), plus ONE survival job per cell that
+# Slurm-depends (afterok) on that cell's 5 temp jobs. Honest metrics land in
+# wandb gust2-scaling-tempopt-n128-{small,medium,large}, group=<sc>,
+# run=<cell>-T<temp> (+ <cell>-survival).
 #
 # Usage:
 #   ./scripts/bridges/sweep_scaling_tempopt_n128.sh                 # all 45 cells
@@ -76,18 +77,31 @@ temps_for() {
         *) echo "" ;;
     esac
 }
-# A full cell is 5 temps x (2000-step rollout + analyze_rollout decoding all
-# 128x2001 frames) + a survival pass that re-decodes them — genuinely a few
-# hours at N=128, dominated by the ~256k-frame VQ decode per temp (the N=4
-# sweep's 1-2h was for 8k frames). The per-temp metrics.json skip, the
-# rollout-reuse skip, and the survival_data skip make any timeout fully
-# resumable, so a resubmit only redoes the missing analysis.
+# Each job is now a SINGLE temp: one 2000-step rollout + analyze_rollout decoding
+# all 128x2001 frames, dominated by the ~256k-frame VQ decode (the N=4 sweep's
+# 1-2h was for 8k frames). Fanning out one job per (cell, temp) across the queue
+# means a cell's 5 temps run in parallel instead of back-to-back, so walltimes
+# drop to per-single-temp budgets. The per-temp metrics.json skip and the
+# rollout-reuse skip make any timeout fully resumable, so a resubmit only redoes
+# the missing analysis.
 walltime_for() {
     case "$1" in
-        sc341)  echo "4:00:00"  ;;
-        sc917)  echo "6:00:00"  ;;
-        sc1941) echo "10:00:00" ;;
-        *)      echo "6:00:00"  ;;
+        sc341)  echo "1:00:00" ;;
+        sc917)  echo "1:30:00" ;;
+        sc1941) echo "3:00:00" ;;
+        *)      echo "1:30:00" ;;
+    esac
+}
+
+# Survival re-decodes all of the cell's temps' frames in one pass, so it gets a
+# larger budget than a single temp. Runs once, after all 5 temp jobs finish
+# (Slurm --dependency=afterok). The survival_data.npz skip keeps it resumable.
+survival_walltime_for() {
+    case "$1" in
+        sc341)  echo "1:00:00" ;;
+        sc917)  echo "2:00:00" ;;
+        sc1941) echo "4:00:00" ;;
+        *)      echo "2:00:00" ;;
     esac
 }
 
@@ -147,11 +161,14 @@ if [ -n "${FILTER_SIZE}" ]; then SIZES=("${FILTER_SIZE}"); fi
 
 if [ "${LIST_ONLY}" = true ]; then
     echo "Canonical long-term scaling sweep — N=${N_TRAJ}, posmask ON, + survival:"
+    echo "  Fan-out: ONE Slurm job per (cell, temp); ONE survival job per cell"
+    echo "  (--dependency=afterok on that cell's 5 temp job IDs)."
     echo ""
     echo "  Temperature brackets:"
     for sc in sc341 sc917 sc1941; do
-        printf "    %-7s temps=[%s]  ic_chunk=%s  walltime=%s\n" \
-            "${sc}" "$(temps_for ${sc})" "$(ic_chunk_for ${sc})" "$(walltime_for ${sc})"
+        printf "    %-7s temps=[%s]  ic_chunk=%s  temp_walltime=%s  surv_walltime=%s\n" \
+            "${sc}" "$(temps_for ${sc})" "$(ic_chunk_for ${sc})" \
+            "$(walltime_for ${sc})" "$(survival_walltime_for ${sc})"
     done
     echo ""
     n_cells=0
@@ -161,9 +178,11 @@ if [ "${LIST_ONLY}" = true ]; then
             n_cells=$((n_cells + 1))
         done
     done
-    echo "  Cells (jobs): ${n_cells}  (sizes: ${SIZES[*]})"
-    echo "  Rollouts:     ${n_cells} × 5 temps = $((n_cells * 5))  (+ ${n_cells} survival passes)"
-    echo "  Wandb:        ${WANDB_PROJECT_PREFIX}-{small,medium,large}, group=<sc>, run=<cell>-T<temp>"
+    echo "  Cells:        ${n_cells}  (sizes: ${SIZES[*]})"
+    echo "  Temp jobs:    ${n_cells} × 5 temps = $((n_cells * 5))"
+    echo "  Survival jobs:${n_cells}  (1 per cell, afterok on its 5 temp jobs)"
+    echo "  Total jobs:   $((n_cells * 6))"
+    echo "  Wandb:        ${WANDB_PROJECT_PREFIX}-{small,medium,large}, group=<sc>, run=<cell>-T<temp> (+ <cell>-survival)"
     echo "  Output base:  ${TEMPOPT_BASE}"
     exit 0
 fi
@@ -172,12 +191,14 @@ echo "=========================================="
 echo "Canonical long-term scaling sweep (N=${N_TRAJ})"
 echo "  Sizes:         ${SIZES[*]}"
 echo "  posmask:       ON   N_traj: ${N_TRAJ}   steps: ${N_STEPS}   + survival"
+echo "  Fan-out:       1 job per (cell, temp); 1 survival/cell (afterok)"
 echo "  Output base:   ${TEMPOPT_BASE}"
 echo "  Wandb:         ${WANDB_PROJECT_PREFIX}-{small,medium,large}"
 echo "  Dry run:       ${DRY_RUN}"
 echo "=========================================="
 
 N_SUBMITTED=0
+N_SURV_SUBMITTED=0
 
 for SIZE in "${SIZES[@]}"; do
     case "${SIZE}" in
@@ -203,6 +224,7 @@ for SIZE in "${SIZES[@]}"; do
         WANDB_GROUP="${SC}"
         TEMPS="$(temps_for ${SC})"
         WALLTIME="$(walltime_for ${SC})"
+        SURV_WALLTIME="$(survival_walltime_for ${SC})"
         IC_CHUNK="$(ic_chunk_for ${SC})"
 
         if [ "${DRY_RUN}" = false ]; then
@@ -221,18 +243,25 @@ for SIZE in "${SIZES[@]}"; do
             mkdir -p "${CELL_DIR}" "${LOG_DIR}" "${WANDB_BASE}"
         fi
 
-        TMPFILE="$(mktemp /tmp/n128_${RUN_NAME}_XXXXXX.sbatch)"
-        cat > "${TMPFILE}" << SBATCH_EOF
+        # ---- One Slurm job per (cell, temp); accumulate IDs for the survival dep ----
+        TEMP_JOBIDS=()
+        for TEMP in ${TEMPS}; do
+            TP="${TEMP/./p}"
+            ROUT="${CELL_DIR}/T${TP}/rollout"
+            AOUT="${CELL_DIR}/T${TP}/analysis"
+
+            TMPFILE="$(mktemp /tmp/n128_${RUN_NAME}_T${TP}_XXXXXX.sbatch)"
+            cat > "${TMPFILE}" << SBATCH_EOF
 #!/bin/bash
-#SBATCH -J n128-${RUN_NAME}
+#SBATCH -J n128-${RUN_NAME}-T${TP}
 #SBATCH -A ${ACCOUNT}
 #SBATCH -p GPU-shared
 #SBATCH -N 1
 #SBATCH --gres=gpu:h100-80:1
 #SBATCH --exclude=w009
 #SBATCH -t ${WALLTIME}
-#SBATCH -o ${LOG_DIR}/${RUN_NAME}-%j.out
-#SBATCH -e ${LOG_DIR}/${RUN_NAME}-%j.err
+#SBATCH -o ${LOG_DIR}/${RUN_NAME}-T${TP}-%j.out
+#SBATCH -e ${LOG_DIR}/${RUN_NAME}-T${TP}-%j.err
 
 set -euo pipefail
 
@@ -248,21 +277,16 @@ echo "Job:          \${SLURM_JOB_ID}"
 echo "Node:         \$(hostname)"
 echo "Started:      \$(date)"
 echo "Cell:         ${RUN_NAME}  (N=${N_TRAJ}, ic_chunk=${IC_CHUNK}, posmask ON)"
-echo "Temps:        ${TEMPS}"
+echo "Temp:         ${TEMP}"
 echo "Wandb:        ${WANDB_PROJECT} / group=${WANDB_GROUP}"
 echo "=========================================="
 
-for TEMP in ${TEMPS}; do
-    TP=\${TEMP/./p}
-    ROUT="${CELL_DIR}/T\${TP}/rollout"
-    AOUT="${CELL_DIR}/T\${TP}/analysis"
-    if [ -f "\${AOUT}/metrics.json" ]; then
-        echo "[skip] T=\${TEMP}: analysis already complete"
-        continue
-    fi
-    echo "---- T=\${TEMP} ----"
-    if [ -f "\${ROUT}/rollout_tokens.npz" ]; then
-        echo "[reuse] T=\${TEMP}: rollout exists, running analysis only"
+if [ -f "${AOUT}/metrics.json" ]; then
+    echo "[skip] T=${TEMP}: analysis already complete"
+else
+    echo "---- T=${TEMP} ----"
+    if [ -f "${ROUT}/rollout_tokens.npz" ]; then
+        echo "[reuse] T=${TEMP}: rollout exists, running analysis only"
     else
         python rollout_nsp.py \\
             --checkpoint_dir "${CHECKPOINT_DIR}" \\
@@ -273,26 +297,77 @@ for TEMP in ${TEMPS}; do
             --n_trajectories ${N_TRAJ} \\
             --ic_chunk ${IC_CHUNK} \\
             --seed ${SEED} \\
-            --temperature \${TEMP} \\
-            --output_dir "\${ROUT}"
+            --temperature ${TEMP} \\
+            --output_dir "${ROUT}"
     fi
 
     python analyze_rollout.py \\
-        --rollout_dir "\${ROUT}" \\
+        --rollout_dir "${ROUT}" \\
         --vqvae_dir "${VQVAE_DIR}" \\
         --data_path "${DATA_PATH}" \\
-        --output_dir "\${AOUT}" \\
+        --output_dir "${AOUT}" \\
         --batch_size ${BATCH_SIZE} \\
         --seed ${SEED} \\
         --wandb_project ${WANDB_PROJECT} \\
-        --wandb_name "${RUN_NAME}-T\${TP}" \\
+        --wandb_name "${RUN_NAME}-T${TP}" \\
         --wandb_group "${WANDB_GROUP}" \\
         --wandb_dir "${WANDB_BASE}"
-done
+fi
 
-# ---- Survival curves across this cell's temperatures (once all temps done) ----
-SURV_OUT="${CELL_DIR}/survival"
-if [ -f "\${SURV_OUT}/survival_data.npz" ]; then
+echo "=========================================="
+echo "Finished:     \$(date)"
+echo "=========================================="
+SBATCH_EOF
+
+            if [ "${DRY_RUN}" = true ]; then
+                echo "[dry-run] ${RUN_NAME} T=${TEMP}  N=${N_TRAJ} ic_chunk=${IC_CHUNK} walltime=${WALLTIME}"
+                TEMP_JOBIDS+=("<jobid-${RUN_NAME}-T${TP}>")
+            else
+                echo "Submitting ${RUN_NAME} T=${TEMP} (N=${N_TRAJ})..."
+                JOBID=$(sbatch --parsable "${TMPFILE}")
+                echo "  -> ${JOBID}"
+                TEMP_JOBIDS+=("${JOBID}")
+                N_SUBMITTED=$((N_SUBMITTED + 1))
+            fi
+            rm -f "${TMPFILE}"
+        done
+
+        # ---- One survival job per cell, gated on its 5 temp jobs (afterok) ----
+        DEP_STR="$(IFS=:; echo "${TEMP_JOBIDS[*]}")"
+        SURV_OUT="${CELL_DIR}/survival"
+
+        TMPFILE="$(mktemp /tmp/n128_${RUN_NAME}_survival_XXXXXX.sbatch)"
+        cat > "${TMPFILE}" << SBATCH_EOF
+#!/bin/bash
+#SBATCH -J n128-${RUN_NAME}-survival
+#SBATCH -A ${ACCOUNT}
+#SBATCH -p GPU-shared
+#SBATCH -N 1
+#SBATCH --gres=gpu:h100-80:1
+#SBATCH --exclude=w009
+#SBATCH -t ${SURV_WALLTIME}
+#SBATCH -o ${LOG_DIR}/${RUN_NAME}-survival-%j.out
+#SBATCH -e ${LOG_DIR}/${RUN_NAME}-survival-%j.err
+
+set -euo pipefail
+
+cd "${REPODIR}"
+source "${OCEAN}/.venvs/gust/bin/activate"
+module load cuda/12.6.1
+
+NVIDIA_LIBS=\$(python -c "import nvidia; print(nvidia.__path__[0])")
+export LD_LIBRARY_PATH=\$(find \$NVIDIA_LIBS -name "lib" -type d | tr '\\n' ':'):\${LD_LIBRARY_PATH:-}
+
+echo "=========================================="
+echo "Job:          \${SLURM_JOB_ID}"
+echo "Node:         \$(hostname)"
+echo "Started:      \$(date)"
+echo "Cell:         ${RUN_NAME}  survival (all temps: ${TEMPS})"
+echo "Wandb:        ${WANDB_PROJECT} / group=${WANDB_GROUP}"
+echo "=========================================="
+
+# ---- Survival curves across this cell's temperatures ----
+if [ -f "${SURV_OUT}/survival_data.npz" ]; then
     echo "[skip] survival: already complete"
 else
     echo "---- survival (all temps) ----"
@@ -300,7 +375,7 @@ else
         --sweep_root "${CELL_DIR}" \\
         --vqvae_dir "${VQVAE_DIR}" \\
         --data_path "${DATA_PATH}" \\
-        --output_dir "\${SURV_OUT}" \\
+        --output_dir "${SURV_OUT}" \\
         --probe_step ${SURV_PROBE_STEP} \\
         --batch_size ${BATCH_SIZE} \\
         --seed ${SEED} \\
@@ -316,16 +391,16 @@ echo "=========================================="
 SBATCH_EOF
 
         if [ "${DRY_RUN}" = true ]; then
-            echo "[dry-run] ${RUN_NAME}  temps=[${TEMPS}]  N=${N_TRAJ} ic_chunk=${IC_CHUNK} walltime=${WALLTIME}"
+            echo "[dry-run] ${RUN_NAME} survival  --dependency=afterok:${DEP_STR}  walltime=${SURV_WALLTIME}"
         else
-            echo "Submitting ${RUN_NAME} (N=${N_TRAJ}, temps: ${TEMPS})..."
-            JOBID=$(sbatch --parsable "${TMPFILE}")
-            echo "  -> ${JOBID}"
-            N_SUBMITTED=$((N_SUBMITTED + 1))
+            echo "Submitting ${RUN_NAME} survival (afterok:${DEP_STR})..."
+            SURV_JOBID=$(sbatch --parsable --dependency=afterok:"${DEP_STR}" "${TMPFILE}")
+            echo "  -> ${SURV_JOBID}"
+            N_SURV_SUBMITTED=$((N_SURV_SUBMITTED + 1))
         fi
         rm -f "${TMPFILE}"
     done
 done
 
 echo ""
-echo "Done. ${N_SUBMITTED} job(s) submitted."
+echo "Done. ${N_SUBMITTED} temp job(s) + ${N_SURV_SUBMITTED} survival job(s) submitted."

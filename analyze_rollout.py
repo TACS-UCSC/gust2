@@ -200,6 +200,150 @@ def compute_enstrophy_spectrum(omega, bin_masks):
 
 
 # =============================================================================
+# Vectorized / GPU-batched spectral analysis
+#
+# These reproduce compute_tke_spectrum / compute_enstrophy_spectrum +
+# radial_average EXACTLY (to fp tolerance), but FFT a whole stack of fields on
+# the GPU at once and radial-average via a precomputed bincount instead of the
+# Python double-loop. The four shared functions above are left untouched so
+# analyze_forecast.py imports remain valid.
+# =============================================================================
+
+
+def setup_radial_bincount(bin_masks):
+    """Precompute a flat bin-index + per-bin counts for vectorized radial avg.
+
+    Reproduces the EXACT binning of setup_spectral_analysis:
+      bin 0  = pixels with k_mag <= k_bins[1]
+      bin i  = pixels with k_bins[i] < k_mag <= k_bins[i+1]
+      pixels with k_mag beyond the last edge belong to NO bin (excluded).
+
+    We derive the index map directly from the bin_masks list (which encodes
+    that exact partition), so it stays in lock-step with setup_spectral_analysis
+    by construction. Pixels in no mask get index -1 and are dropped from the
+    bincount, exactly matching radial_average (which never touches them).
+
+    Returns:
+        bin_index: (H*W,) int array, value in [0, n_bins) or -1 (excluded).
+        counts:    (n_bins,) int array, # pixels per bin (0 for empty bins).
+        n_bins:    int.
+    """
+    n_bins = len(bin_masks)
+    flat_size = bin_masks[0].size
+    # -1 sentinel = "no bin" (k_mag beyond the last edge). Masks are mutually
+    # exclusive by construction, so assignment order is irrelevant.
+    bin_index = np.full(flat_size, -1, dtype=np.int64)
+    for i, mask in enumerate(bin_masks):
+        bin_index[mask.ravel()] = i
+    # counts per bin over ONLY the in-bin pixels (sentinel excluded).
+    valid = bin_index >= 0
+    counts = np.bincount(bin_index[valid], minlength=n_bins)[:n_bins]
+    return bin_index, counts, n_bins
+
+
+def radial_average_batched(density_batch, bin_index, counts, n_bins):
+    """Vectorized radial average of a stack of 2D spectral densities.
+
+    Reproduces `radial_average` per-bin np.mean exactly, for every frame in the
+    batch at once. For bin i:  mean = sum(density over pixels in bin i) / count_i.
+    Empty bins (count 0) are left at 0.0 exactly as radial_average does (it skips
+    bins where np.any(mask) is False, leaving the preallocated zero).
+
+    Args:
+        density_batch: (M, H, W) real array (one spectral density per frame).
+        bin_index:     (H*W,) int, from setup_radial_bincount.
+        counts:        (n_bins,) int, from setup_radial_bincount.
+        n_bins:        int.
+    Returns:
+        (M, n_bins) array of radially-averaged spectra.
+    """
+    density_batch = np.asarray(density_batch)
+    M = density_batch.shape[0]
+    flat = density_batch.reshape(M, -1)               # (M, H*W)
+
+    valid = bin_index >= 0
+    idx = bin_index[valid]                             # (#in-bin,)
+    flat_valid = flat[:, valid]                        # (M, #in-bin)
+
+    # Per-frame bincount via matmul-free loop-free accumulation:
+    # build (M, n_bins) sums with np.add.at over the flat axis is slow; instead
+    # use bincount per frame, which is C-level and fast enough since the heavy
+    # cost (FFT) is on GPU. counts==0 bins stay exactly 0.
+    sums = np.zeros((M, n_bins), dtype=np.float64)
+    for m in range(M):
+        sums[m] = np.bincount(idx, weights=flat_valid[m], minlength=n_bins)[:n_bins]
+
+    safe_counts = np.where(counts > 0, counts, 1)      # guard div-by-zero
+    spectra = sums / safe_counts                       # (M, n_bins)
+    spectra[:, counts == 0] = 0.0                      # match radial_average
+    return spectra
+
+
+def _spectra_from_fields_batched(fields, Kx, Ky, Ksq, bin_index, counts,
+                                 n_bins, gpu_batch=256):
+    """GPU-batched TKE + enstrophy spectra for a stack of fields.
+
+    Computes omega_hat ONCE per frame on the GPU and derives BOTH spectra from
+    it (the per-frame functions FFT the same field twice; this does it once).
+
+    Args:
+        fields: (M, H, W) real array of vorticity frames.
+        Kx, Ky, Ksq: wavenumber grids from setup_spectral_analysis.
+        bin_index, counts, n_bins: from setup_radial_bincount.
+        gpu_batch: # frames to FFT per GPU call (caps device memory).
+    Returns:
+        (tke_spectra, ens_spectra), each (M, n_bins).
+    """
+    fields = np.asarray(fields)
+    M = fields.shape[0]
+
+    Kx_j = jnp.asarray(Kx)
+    Ky_j = jnp.asarray(Ky)
+    Ksq_j = jnp.asarray(Ksq)
+    # Guarded inverse of Ksq: 1/Ksq where Ksq>0 else 0. psi_hat = omega_hat * inv
+    # reproduces the np code's `psi_hat[nonzero] = omega_hat[nonzero]/Ksq` with
+    # psi_hat left 0 where Ksq==0 (the k=0 mode).
+    inv_Ksq_j = jnp.where(Ksq_j > 0, 1.0 / jnp.where(Ksq_j > 0, Ksq_j, 1.0), 0.0)
+
+    @jax.jit
+    def _densities(stack):
+        # stack: (b, H, W) real -> (KE_density, enstrophy_density), each (b,H,W)
+        omega_hat = jnp.fft.fft2(stack)
+        psi_hat = omega_hat * inv_Ksq_j
+        u_hat = 1j * Ky_j * psi_hat
+        v_hat = 1j * Kx_j * psi_hat
+        ke_density = 0.5 * (jnp.abs(u_hat) ** 2 + jnp.abs(v_hat) ** 2)
+        ens_density = 0.5 * jnp.abs(omega_hat) ** 2
+        return ke_density, ens_density
+
+    tke_spectra = np.zeros((M, n_bins), dtype=np.float64)
+    ens_spectra = np.zeros((M, n_bins), dtype=np.float64)
+
+    for s in range(0, M, gpu_batch):
+        e = min(s + gpu_batch, M)
+        stack = jnp.asarray(fields[s:e])
+        ke_d, ens_d = _densities(stack)
+        ke_d = np.asarray(ke_d)
+        ens_d = np.asarray(ens_d)
+        tke_spectra[s:e] = radial_average_batched(ke_d, bin_index, counts, n_bins)
+        ens_spectra[s:e] = radial_average_batched(ens_d, bin_index, counts, n_bins)
+
+    return tke_spectra, ens_spectra
+
+
+def time_averaged_spectra(fields, Kx, Ky, Ksq, bin_index, counts, n_bins,
+                          gpu_batch=256):
+    """Convenience: per-frame spectra time-averaged (mean over the M frames).
+
+    Returns (tke_mean, ens_mean), each (n_bins,) -- the GPU-batched equivalent
+    of summing compute_tke/enstrophy_spectrum over frames and dividing by M.
+    """
+    tke_spectra, ens_spectra = _spectra_from_fields_batched(
+        fields, Kx, Ky, Ksq, bin_index, counts, n_bins, gpu_batch=gpu_batch)
+    return tke_spectra.mean(axis=0), ens_spectra.mean(axis=0)
+
+
+# =============================================================================
 # Metrics
 # =============================================================================
 
@@ -398,32 +542,25 @@ def main():
     H, W = 256, 256
     Kx, Ky, Ksq, k_centers, bin_masks = setup_spectral_analysis(H, W)
     n_bins = len(k_centers)
+    # Precompute the vectorized radial-average index map ONCE (reproduces the
+    # bin_masks partition exactly). GPU-batched FFT replaces the per-frame loop.
+    bin_index, bin_counts, _ = setup_radial_bincount(bin_masks)
 
     # GT and VQ-VAE spectra (single trajectory, time-averaged):
-    gt_tke = np.zeros(n_bins);     gt_ens = np.zeros(n_bins)
-    vqvae_tke = np.zeros(n_bins);  vqvae_ens = np.zeros(n_bins)
-    for i in range(n_frames):
-        gt_tke += compute_tke_spectrum(raw_gt[i, 0], Kx, Ky, Ksq, bin_masks)
-        gt_ens += compute_enstrophy_spectrum(raw_gt[i, 0], bin_masks)
-        vqvae_tke += compute_tke_spectrum(vqvae_fields[i, 0], Kx, Ky, Ksq, bin_masks)
-        vqvae_ens += compute_enstrophy_spectrum(vqvae_fields[i, 0], bin_masks)
-    gt_tke /= n_frames;     gt_ens /= n_frames
-    vqvae_tke /= n_frames;  vqvae_ens /= n_frames
+    gt_tke, gt_ens = time_averaged_spectra(
+        raw_gt[:, 0], Kx, Ky, Ksq, bin_index, bin_counts, n_bins)
+    vqvae_tke, vqvae_ens = time_averaged_spectra(
+        vqvae_fields[:, 0], Kx, Ky, Ksq, bin_index, bin_counts, n_bins)
 
     # NSP spectra: per trajectory time-averaged, then mean across trajectories
     # for the ensemble spectrum used in plots/RSE.
     nsp_tke_per_traj = np.zeros((N, n_bins))
     nsp_ens_per_traj = np.zeros((N, n_bins))
     for j in range(N):
-        for i in range(n_frames):
-            nsp_tke_per_traj[j] += compute_tke_spectrum(
-                nsp_fields_per_traj[j][i, 0], Kx, Ky, Ksq, bin_masks)
-            nsp_ens_per_traj[j] += compute_enstrophy_spectrum(
-                nsp_fields_per_traj[j][i, 0], bin_masks)
-            if (i + 1) % 500 == 0 or i == n_frames - 1:
-                print(f"  traj {j+1}/{N} frame {i+1}/{n_frames}")
-        nsp_tke_per_traj[j] /= n_frames
-        nsp_ens_per_traj[j] /= n_frames
+        nsp_tke_per_traj[j], nsp_ens_per_traj[j] = time_averaged_spectra(
+            nsp_fields_per_traj[j][:, 0], Kx, Ky, Ksq,
+            bin_index, bin_counts, n_bins)
+        print(f"  traj {j+1}/{N} spectra done")
     # Ensemble spectrum (mean of per-trajectory time-averaged spectra) is
     # the right "expected" spectrum given the model's sampling distribution.
     nsp_tke = nsp_tke_per_traj.mean(axis=0)
