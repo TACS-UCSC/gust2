@@ -76,16 +76,18 @@ temps_for() {
         *) echo "" ;;
     esac
 }
-# The H100 chews through N=128 batches in parallel: a full cell (5 temps x 2000
-# steps + analyze + survival) lands well under an hour. Tight walltimes also get
-# better GPU-shared queue priority; the per-temp metrics.json + survival_data
-# skips make any (unlikely) timeout fully resumable on resubmit.
+# A full cell is 5 temps x (2000-step rollout + analyze_rollout decoding all
+# 128x2001 frames) + a survival pass that re-decodes them — genuinely a few
+# hours at N=128, dominated by the ~256k-frame VQ decode per temp (the N=4
+# sweep's 1-2h was for 8k frames). The per-temp metrics.json skip, the
+# rollout-reuse skip, and the survival_data skip make any timeout fully
+# resumable, so a resubmit only redoes the missing analysis.
 walltime_for() {
     case "$1" in
-        sc341)  echo "0:30:00" ;;
-        sc917)  echo "0:45:00" ;;
-        sc1941) echo "1:00:00" ;;
-        *)      echo "1:00:00" ;;
+        sc341)  echo "4:00:00"  ;;
+        sc917)  echo "6:00:00"  ;;
+        sc1941) echo "10:00:00" ;;
+        *)      echo "6:00:00"  ;;
     esac
 }
 
@@ -259,17 +261,21 @@ for TEMP in ${TEMPS}; do
         continue
     fi
     echo "---- T=\${TEMP} ----"
-    python rollout_nsp.py \\
-        --checkpoint_dir "${CHECKPOINT_DIR}" \\
-        --tokens_path "${VAL_TOKENS}" \\
-        --train_tokens_path "${TRAIN_TOKENS}" \\
-        --start_frame ${START_FRAME} \\
-        --n_steps ${N_STEPS} \\
-        --n_trajectories ${N_TRAJ} \\
-        --ic_chunk ${IC_CHUNK} \\
-        --seed ${SEED} \\
-        --temperature \${TEMP} \\
-        --output_dir "\${ROUT}"
+    if [ -f "\${ROUT}/rollout_tokens.npz" ]; then
+        echo "[reuse] T=\${TEMP}: rollout exists, running analysis only"
+    else
+        python rollout_nsp.py \\
+            --checkpoint_dir "${CHECKPOINT_DIR}" \\
+            --tokens_path "${VAL_TOKENS}" \\
+            --train_tokens_path "${TRAIN_TOKENS}" \\
+            --start_frame ${START_FRAME} \\
+            --n_steps ${N_STEPS} \\
+            --n_trajectories ${N_TRAJ} \\
+            --ic_chunk ${IC_CHUNK} \\
+            --seed ${SEED} \\
+            --temperature \${TEMP} \\
+            --output_dir "\${ROUT}"
+    fi
 
     python analyze_rollout.py \\
         --rollout_dir "\${ROUT}" \\
