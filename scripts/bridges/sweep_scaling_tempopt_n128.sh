@@ -88,10 +88,12 @@ walltime_for() {
     case "$1" in
         sc341)  echo "1:00:00"  ;;
         sc917)  echo "1:30:00"  ;;
-        sc1941) echo "10:00:00" ;;   # wide archs (1024d) ~3.4x s48 compute; the
-                                     # 2000-step rollout dominates. Deliberate
-                                     # over-allocation after two timeouts; the
-                                     # now-unbuffered logs let us right-size it.
+        sc1941) echo "6:00:00" ;;    # wide archs (1024d) ~3.4x s48 compute, but
+                                     # the rollout is now ~2x faster (per-step
+                                     # accuracy sync-storm removed, commit
+                                     # 6a75023). 6h covers the wide-model rollout
+                                     # with margin; unbuffered logs reveal the
+                                     # real H100 rate to tighten further.
         *)      echo "1:30:00"   ;;
     esac
 }
