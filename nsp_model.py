@@ -383,7 +383,8 @@ class NSPModel(eqx.Module):
     def __call__(self, tokens: jax.Array, scale_ids: jax.Array,
                  frame_ids: jax.Array, attn_bias: jax.Array,
                  rope_coords: jax.Array,
-                 token_vectors: jax.Array | None = None) -> jax.Array:
+                 token_vectors: jax.Array | None = None,
+                 remat: bool = True) -> jax.Array:
         """
         Args:
             tokens: (L,) token indices
@@ -392,6 +393,11 @@ class NSPModel(eqx.Module):
             attn_bias: (L, L) additive attention mask
             rope_coords: (L, 2) row/col coordinates
             token_vectors: optional (L, codebook_dim) pre-looked-up vectors
+            remat: wrap each block in eqx.filter_checkpoint (gradient
+                rematerialization). Saves activation memory during backprop
+                and is the right default for training. Inference (rollout,
+                eval) has no backward pass, so pass remat=False to skip the
+                useless remat — faster lowering and no dead rematerialization.
 
         Returns:
             (L, n_embd) hidden states
@@ -400,7 +406,10 @@ class NSPModel(eqx.Module):
                            token_vectors=token_vectors)
 
         for block in self.blocks:
-            x = eqx.filter_checkpoint(block)(x, attn_bias, rope_coords)
+            if remat:
+                x = eqx.filter_checkpoint(block)(x, attn_bias, rope_coords)
+            else:
+                x = block(x, attn_bias, rope_coords)
 
         x = jax.vmap(self.ln_f)(x.astype(jnp.float32)).astype(x.dtype)
         return x
@@ -498,6 +507,7 @@ def forward_teacher_forced(model: NSPModel, tokens_full: jax.Array,
                            scales_t1: tuple, padded_len_t1: int,
                            attn_bias: jax.Array,
                            token_vectors: jax.Array | None = None,
+                           remat: bool = True,
                            ) -> jax.Array:
     """Forward pass with asymmetric t0 (full) / t1 (truncated) lengths.
 
@@ -510,6 +520,8 @@ def forward_teacher_forced(model: NSPModel, tokens_full: jax.Array,
         padded_len_t0, padded_len_t1: padded lengths
         attn_bias: (L0+L1, L0+L1) attention mask
         token_vectors: optional (L0+L1, codebook_dim) pre-looked-up vectors
+        remat: forwarded to model() — True (default) wraps blocks in
+            gradient rematerialization (training); False skips it (inference).
 
     Returns:
         (L0+L1, n_embd) hidden states
@@ -531,7 +543,7 @@ def forward_teacher_forced(model: NSPModel, tokens_full: jax.Array,
     rope_coords = jnp.concatenate([coords_t0, coords_t1], axis=0)
 
     return model(tokens_full, scale_ids, frame_ids, attn_bias, rope_coords,
-                 token_vectors=token_vectors)
+                 token_vectors=token_vectors, remat=remat)
 
 
 # =============================================================================
@@ -646,6 +658,7 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
             scales_t0, padded_len_t0,
             scales_t1, padded_len_t1,
             attn_bias,
+            remat=False,   # inference: no backward pass, skip rematerialization
         )
 
         h_t0 = hidden[:padded_len_t0, :]

@@ -115,7 +115,12 @@ def parse_args():
 
 
 def compute_token_accuracy(pred_tokens, gt_tokens, config):
-    """Per-scale and overall token accuracy."""
+    """Per-scale and overall token accuracy for a single (pred, gt) frame.
+
+    Kept for API compatibility / single-frame use. The rollout hot loop uses
+    the vectorized numpy path below instead to avoid per-step device->host
+    syncs.
+    """
     boundaries = config.scale_boundaries
     results = {}
     total_correct = 0
@@ -133,6 +138,50 @@ def compute_token_accuracy(pred_tokens, gt_tokens, config):
 
     results["overall"] = total_correct / total_tokens
     return results
+
+
+def compute_per_step_accuracy_np(pred_steps, gt_steps, config):
+    """Vectorized per-step, mean-over-trajectories token accuracy.
+
+    Single numpy pass over the already-collected rollout tokens — no
+    device->host syncs in the hot loop. Reproduces the exact values the old
+    per-step `compute_token_accuracy` Python loop produced (per-trajectory
+    accuracy fractions averaged over trajectories), as a list of per-step
+    dicts suitable for rollout_metrics.json["per_step"].
+
+    Args:
+        pred_steps: (n_steps, N, tokens_per_frame) predicted t1 tokens
+        gt_steps:   (n_steps, N, tokens_per_frame) ground-truth t1 tokens
+        config: NSPConfig
+
+    Returns:
+        list of length n_steps; each entry a dict with per-scale keys
+        ("scale_HxW") and "overall", all floats (mean over trajectories).
+    """
+    boundaries = config.scale_boundaries
+    eq = (np.asarray(pred_steps) == np.asarray(gt_steps))   # (n_steps, N, P)
+
+    per_step = []
+    n_steps = eq.shape[0]
+    for step in range(n_steps):
+        eq_step = eq[step]                                  # (N, P)
+        results = {}
+        total_correct = np.zeros(eq_step.shape[0], dtype=np.float64)
+        total_tokens = 0
+        for scale_idx in config.trainable_scale_indices:
+            start = boundaries[scale_idx]
+            end = boundaries[scale_idx + 1]
+            n = end - start
+            # per-trajectory correct fraction, then mean over trajectories,
+            # matching the old float(np.mean([per-traj acc])) reduction.
+            correct = eq_step[:, start:end].sum(axis=1)     # (N,)
+            h, w = config.scales[scale_idx]
+            results[f"scale_{h}x{w}"] = float(np.mean(correct / n))
+            total_correct += correct
+            total_tokens += n
+        results["overall"] = float(np.mean(total_correct / total_tokens))
+        per_step.append(results)
+    return per_step
 
 
 def main():
@@ -390,7 +439,6 @@ def main():
         out = generate_step_chunked(t0_batch, keys_step)
         if log_topk > 0:
             t1_batch, top_logits_step, top_indices_step = out
-            t1_batch.block_until_ready()
             # Cast on-device to fp16 / int16 before host transfer to halve
             # bandwidth + storage. effective_vocab_size <= 4096 fits int16.
             top_logits_step = top_logits_step.astype(jnp.float16)
@@ -399,42 +447,45 @@ def main():
             logit_indices_per_step.append(np.array(top_indices_step))
         else:
             t1_batch = out
-            t1_batch.block_until_ready()
 
-        # Accuracy per trajectory vs GT at (start_frame + step + 1).
+        # Host copy of the predicted frame. np.array() forces the single
+        # device->host transfer for this step (also acts as the sync point);
+        # no separate block_until_ready needed. Per-step accuracy is NOT
+        # computed here — it is recovered in one vectorized numpy pass after
+        # the loop (compute_per_step_accuracy_np) to avoid the per-step
+        # device->host sync storm. GT comes straight off the host-resident
+        # `indices` array (no device round-trip).
+        t1_host = np.array(t1_batch)
         gt_indices_step = start_frames + step + 1
-        gt_batch = jnp.array(indices[gt_indices_step])           # (N, tokens_per_frame)
-        per_traj_acc = [
-            compute_token_accuracy(t1_batch[i], gt_batch[i], config)
-            for i in range(N)
-        ]
-        mean_acc = {
-            k: float(np.mean([a[k] for a in per_traj_acc]))
-            for k in per_traj_acc[0].keys()
-        }
-        all_accuracies.append(mean_acc)
+        gt_host = np.asarray(indices[gt_indices_step])           # (N, tokens_per_frame)
 
         if (step + 1) % log_every == 0 or step == 0 or step == args.n_steps - 1:
             elapsed = time.time() - t_start
             sec_per_step = elapsed / (step + 1)
             eta = sec_per_step * (args.n_steps - step - 1)
-            scale_parts = []
-            for si in trainable_indices:
-                h, w = config.scales[si]
-                scale_parts.append(f"{h}x{w}={mean_acc[f'scale_{h}x{w}']:.3f}")
-            tag = "" if N == 1 else f" [N={N} mean]"
+            tag = "" if N == 1 else f" [N={N}]"
             print(f"  Step {step+1}/{args.n_steps}{tag}: "
-                  f"acc={mean_acc['overall']:.4f} [{' '.join(scale_parts)}] "
                   f"({sec_per_step:.2f}s/step, ETA {eta/60:.1f}min)")
 
-        rollout_tokens.append(np.array(t1_batch))
-        gt_tokens_list.append(np.array(gt_batch))
+        rollout_tokens.append(t1_host)
+        gt_tokens_list.append(gt_host)
         t0_batch = t1_batch
 
     elapsed_total = time.time() - t_start
     print(f"\nDone: {args.n_steps} steps x {N} trajectories "
           f"in {elapsed_total/60:.1f} min "
           f"({elapsed_total/args.n_steps:.2f}s/step)")
+
+    # Per-step token accuracy, computed ONCE in a single vectorized numpy pass
+    # over the host-resident rollout/GT tokens (no per-step device->host
+    # syncs). Predictions are entries 1..n_steps; entry 0 is the IC frame.
+    # Reproduces the exact per_step values the old in-loop Python sync loop
+    # produced (per-trajectory accuracy averaged over trajectories).
+    if args.n_steps > 0:
+        pred_steps = np.stack(rollout_tokens[1:], axis=0)   # (n_steps, N, P)
+        gt_steps = np.stack(gt_tokens_list[1:], axis=0)     # (n_steps, N, P)
+        all_accuracies = compute_per_step_accuracy_np(
+            pred_steps, gt_steps, config)
 
     # Stack -> (N, n_steps+1, tokens_per_frame). If N==1, squeeze for
     # backward-compat with existing analyze_rollout.py (rank-3).
