@@ -86,10 +86,13 @@ temps_for() {
 # the missing analysis.
 walltime_for() {
     case "$1" in
-        sc341)  echo "1:00:00" ;;
-        sc917)  echo "1:30:00" ;;
-        sc1941) echo "3:00:00" ;;
-        *)      echo "1:30:00" ;;
+        sc341)  echo "1:00:00"  ;;
+        sc917)  echo "1:30:00"  ;;
+        sc1941) echo "10:00:00" ;;   # wide archs (1024d) ~3.4x s48 compute; the
+                                     # 2000-step rollout dominates. Deliberate
+                                     # over-allocation after two timeouts; the
+                                     # now-unbuffered logs let us right-size it.
+        *)      echo "1:30:00"   ;;
     esac
 }
 
@@ -268,6 +271,7 @@ set -euo pipefail
 cd "${REPODIR}"
 source "${OCEAN}/.venvs/gust/bin/activate"
 module load cuda/12.6.1
+export PYTHONUNBUFFERED=1   # live stdout: step progress survives a SIGKILL timeout
 
 NVIDIA_LIBS=\$(python -c "import nvidia; print(nvidia.__path__[0])")
 export LD_LIBRARY_PATH=\$(find \$NVIDIA_LIBS -name "lib" -type d | tr '\\n' ':'):\${LD_LIBRARY_PATH:-}
@@ -354,6 +358,7 @@ set -euo pipefail
 cd "${REPODIR}"
 source "${OCEAN}/.venvs/gust/bin/activate"
 module load cuda/12.6.1
+export PYTHONUNBUFFERED=1   # live stdout: step progress survives a SIGKILL timeout
 
 NVIDIA_LIBS=\$(python -c "import nvidia; print(nvidia.__path__[0])")
 export LD_LIBRARY_PATH=\$(find \$NVIDIA_LIBS -name "lib" -type d | tr '\\n' ':'):\${LD_LIBRARY_PATH:-}
