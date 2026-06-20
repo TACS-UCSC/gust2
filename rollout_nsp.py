@@ -36,6 +36,21 @@ from nsp_model import (
 from tokenizer import load_tokenized_data, unflatten_to_scales
 
 
+def atomic_savez_compressed(path, **arrays):
+    """np.savez_compressed to a temp file, then atomically rename into place.
+
+    A killed job (e.g. scancel / walltime SIGKILL mid-save) leaves either the
+    complete .npz or nothing at `path` — never a truncated file. This matters
+    because the sweep's rollout-reuse skip checks for rollout_tokens.npz and a
+    partial file would be fed to np.load downstream (BadZipFile). Writing to a
+    file object (not a str) stops np.savez from appending .npz to the temp name.
+    """
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        np.savez_compressed(f, **arrays)
+    os.replace(tmp, path)   # atomic on the same filesystem
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="NSP autoregressive rollout")
     parser.add_argument("--checkpoint_dir", type=str, required=True,
@@ -529,7 +544,7 @@ def main():
                 save_dict[f"{frame_key}_scale_{s}"] = np.stack(per_scale)
 
     tokens_path = os.path.join(args.output_dir, "rollout_tokens.npz")
-    np.savez_compressed(tokens_path, **save_dict)
+    atomic_savez_compressed(tokens_path, **save_dict)
     print(f"  Tokens: {tokens_path} (shape {rollout_tokens.shape}, N={N})")
 
     # Decode-parameter metadata for downstream diagnostics (cfg discovery,
@@ -565,7 +580,7 @@ def main():
             top_logits_arr = top_logits_arr[0]   # (n_steps, tok, K)
             top_indices_arr = top_indices_arr[0]
         logits_path = os.path.join(args.output_dir, "rollout_logits.npz")
-        np.savez_compressed(
+        atomic_savez_compressed(
             logits_path,
             top_logits=top_logits_arr,           # fp16
             top_indices=top_indices_arr,         # int16
