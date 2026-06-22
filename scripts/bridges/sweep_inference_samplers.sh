@@ -80,16 +80,21 @@ walltime_for() {
     esac
 }
 
-# ---------- Sampler arms: "label|needs_anchor|flags" ----------
+# ---------- Sampler arms: "label|anchor_src|flags" ----------
+# anchor_src: tok = tokenizer marginal entropy (measure_tokenizer_entropy.py),
+#             model = model teacher-forced conditional entropy (measure_model_entropy.py),
+#             none = no anchor. The model anchor is the principled one (the
+#             marginal over-warms cold-optimal sc341 into over-diffusion).
 # Non-ancestral samplers ignore --temperature, but we pass --temperature 1.0
 # everywhere to respect the project's "never invoke rollout greedy" convention.
 ARMS=(
-    "etpool|1|--sampler entropy_target --anchor_stat pooled"
-    "etpos|1|--sampler entropy_target --anchor_stat per_position"
-    "tophabs|1|--sampler top_h --top_h_mode absolute --anchor_stat per_position"
-    "typical|0|--sampler typical --typical_tau 0.95"
-    "minp|0|--sampler min_p --min_p 0.05"
-    "invedt|0|--sampler inverted_edt --inverted_edt_strength 0.5"
+    "etpool|tok|--sampler entropy_target --anchor_stat pooled"
+    "etpos|tok|--sampler entropy_target --anchor_stat per_position"
+    "etmodel|model|--sampler entropy_target --anchor_stat per_position"
+    "tophabs|tok|--sampler top_h --top_h_mode absolute --anchor_stat per_position"
+    "typical|none|--sampler typical --typical_tau 0.95"
+    "minp|none|--sampler min_p --min_p 0.05"
+    "invedt|none|--sampler inverted_edt --inverted_edt_strength 0.5"
 )
 
 # ---------- Sweep grid (matches sweep_scaling_tempopt_n128.sh) ----------
@@ -173,8 +178,8 @@ if [ "${LIST_ONLY}" = true ]; then
     echo "Inference-sampler sweep — N=${N_TRAJ}, posmask ON, sampler-arm axis:"
     echo "  Arms:"
     for armspec in "${ARMS[@]}"; do
-        IFS='|' read -r ARM NEEDS FLAGS <<< "${armspec}"
-        printf "    %-9s needs_anchor=%s  %s\n" "${ARM}" "${NEEDS}" "${FLAGS}"
+        IFS='|' read -r ARM SRC FLAGS <<< "${armspec}"
+        printf "    %-9s anchor_src=%-6s %s\n" "${ARM}" "${SRC}" "${FLAGS}"
     done
     echo ""
     echo "  Brackets per sc:"
@@ -242,7 +247,7 @@ for SIZE in "${SIZES[@]}"; do
         fi
 
         for armspec in "${ARMS[@]}"; do
-            IFS='|' read -r ARM NEEDS_ANCHOR ARM_FLAGS <<< "${armspec}"
+            IFS='|' read -r ARM ANCHOR_SRC ARM_FLAGS <<< "${armspec}"
             arm_selected "${ARM}" || continue
 
             ARM_DIR="${CELL_DIR}/${ARM}"
@@ -251,7 +256,7 @@ for SIZE in "${SIZES[@]}"; do
             ANCHOR="${ARM_DIR}/anchor.json"
 
             ANCHOR_FLAG=""
-            if [ "${NEEDS_ANCHOR}" = "1" ]; then
+            if [ "${ANCHOR_SRC}" != "none" ]; then
                 ANCHOR_FLAG="--entropy_anchor_path ${ANCHOR}"
             fi
 
@@ -290,13 +295,17 @@ mkdir -p "${ARM_DIR}"
 if [ -f "${AOUT}/metrics.json" ]; then
     echo "[skip] ${ARM}: analysis already complete"
 else
-    # Build the per-scale entropy anchor from the cell's TRAIN tokens (same
-    # tokenizer as the checkpoint). Idempotent; arm-local so no cross-arm race.
-    if [ "${NEEDS_ANCHOR}" = "1" ] && [ ! -f "${ANCHOR}" ]; then
-        echo "---- building anchor (${ANCHOR}) ----"
-        python measure_tokenizer_entropy.py \\
-            --tokens_path "${TRAIN_TOKENS}" \\
-            --output "${ANCHOR}"
+    # Build the per-scale entropy anchor (idempotent; arm-local -> no race).
+    # tok   = tokenizer marginal entropy from the cell's TRAIN tokens.
+    # model = model teacher-forced CONDITIONAL entropy on VAL pairs (GPU forward;
+    #         the principled anchor — marginal over-warms cold-optimal sc341).
+    if [ -n "${ANCHOR_FLAG}" ] && [ ! -f "${ANCHOR}" ]; then
+        echo "---- building ${ANCHOR_SRC} anchor: ${ANCHOR} ----"
+        if [ "${ANCHOR_SRC}" = "model" ]; then
+            python measure_model_entropy.py --checkpoint_dir "${CHECKPOINT_DIR}" --tokens_path "${VAL_TOKENS}" --output "${ANCHOR}" --max_pairs 256
+        else
+            python measure_tokenizer_entropy.py --tokens_path "${TRAIN_TOKENS}" --output "${ANCHOR}"
+        fi
     fi
 
     if [ -f "${ROUT}/rollout_tokens.npz" ]; then

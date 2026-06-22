@@ -35,8 +35,9 @@ ENTITY = "bigpseud-ucsc"
 SIZES = ["small", "medium", "large"]
 SCS = ["sc341", "sc917", "sc1941"]
 
-ARMS = ["etpool", "etpos", "tophabs", "typical", "minp", "invedt"]
+ARMS = ["etmodel", "etpool", "etpos", "tophabs", "typical", "minp", "invedt"]
 ARM_LABEL = {
+    "etmodel": "entropy-target (model H)",
     "etpool": "entropy-target (pooled)",
     "etpos": "entropy-target (per-pos)",
     "tophabs": "Top-H abs (trunc-only)",
@@ -46,6 +47,7 @@ ARM_LABEL = {
 }
 # (color, marker, linestyle)
 ARM_STYLE = {
+    "etmodel": ("C6", "P", "-"),
     "etpool": ("C2", "o", "-"),
     "etpos": ("C0", "s", "-"),
     "tophabs": ("C4", "^", "--"),
@@ -53,7 +55,9 @@ ARM_STYLE = {
     "minp": ("C3", "v", ":"),
     "invedt": ("C5", "x", ":"),
 }
-HEADLINE_ARM = "etpool"
+# etmodel (model conditional-entropy anchor) is the principled headline — the
+# tokenizer-marginal anchor (etpool) over-warms cold-optimal sc341.
+HEADLINE_ARM = "etmodel"
 
 
 def label_to_params_M(label):

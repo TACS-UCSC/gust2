@@ -150,6 +150,8 @@ def make_predict_and_loss(config, scales_t0, padded_len_t0,
             per_scale_ce: (n_trainable,) raw CE per scale (OOD-masked)
             per_scale_ood: (n_trainable,) fraction of val tokens whose GT
                 compact index falls outside this scale's training vocabulary
+            per_scale_entropy: (n_trainable,) mean teacher-forced predictive
+                entropy (nats) of the model's per-position code distribution
         """
         # Build input: [t0_padded, t1_truncated_padded]
         # For eval we teacher-force t1 context so the CE is comparable to
@@ -173,6 +175,7 @@ def make_predict_and_loss(config, scales_t0, padded_len_t0,
         total_ce = jnp.float32(0.0)
         per_scale_ce_list = []
         per_scale_ood_list = []
+        per_scale_entropy_list = []
 
         for i, scale_idx in enumerate(trainable_indices):
             h_k, w_k = config.scales[scale_idx]
@@ -238,9 +241,19 @@ def make_predict_and_loss(config, scales_t0, padded_len_t0,
             per_scale_ce_list.append(raw_ce)
             per_scale_ood_list.append(ood_rate)
 
+            # Model predictive entropy at this scale (teacher-forced): mean over
+            # positions of H(softmax(logits)). Support-masked entries have prob
+            # ~exp(-1e9)=0, so they contribute 0 (no NaN) — this is the model's
+            # CONDITIONAL code entropy, the principled sampler anchor (much
+            # sharper than the tokenizer's marginal code entropy).
+            probs = jnp.exp(log_probs)
+            ent_pos = -jnp.sum(probs * log_probs, axis=-1)   # (n_tokens_k,)
+            per_scale_entropy_list.append(jnp.mean(ent_pos))
+
         per_scale_ce = jnp.stack(per_scale_ce_list)
         per_scale_ood = jnp.stack(per_scale_ood_list)
-        return predicted, total_ce, per_scale_ce, per_scale_ood
+        per_scale_entropy = jnp.stack(per_scale_entropy_list)
+        return predicted, total_ce, per_scale_ce, per_scale_ood, per_scale_entropy
 
     return predict_and_loss
 
@@ -367,6 +380,7 @@ def main():
     all_ce = []
     all_per_scale_ce = []
     all_per_scale_ood = []
+    all_per_scale_entropy = []
     all_pred_tokens = []
     all_gt_tokens = []
 
@@ -380,12 +394,13 @@ def main():
         t0 = jnp.array(indices[i])
         t1 = jnp.array(indices[i + 1])
 
-        predicted, ce, per_scale_ce, per_scale_ood = predict_and_loss(
-            model, exp_heads, t0, t1, sample_keys[i])
+        predicted, ce, per_scale_ce, per_scale_ood, per_scale_entropy = \
+            predict_and_loss(model, exp_heads, t0, t1, sample_keys[i])
 
         all_ce.append(float(ce))
         all_per_scale_ce.append(np.array(per_scale_ce))
         all_per_scale_ood.append(np.array(per_scale_ood))
+        all_per_scale_entropy.append(np.array(per_scale_entropy))
         all_pred_tokens.append(np.array(predicted))
         all_gt_tokens.append(np.array(t1))
 
@@ -403,6 +418,7 @@ def main():
     per_scale_means = np.mean(np.stack(all_per_scale_ce), axis=0)
     per_scale_ood_means = np.mean(np.stack(all_per_scale_ood), axis=0)
     mean_ood = float(np.mean(per_scale_ood_means))
+    per_scale_entropy_means = np.mean(np.stack(all_per_scale_entropy), axis=0)
 
     # Token-weighted per-token CE (physically meaningful nats/token, independent
     # of the training-signal scale weighting). This is what plot_scaling.py
@@ -421,7 +437,8 @@ def main():
     for j, idx in enumerate(trainable_indices):
         h, w = config.scales[idx]
         print(f"  Scale {h}x{w}: CE={per_scale_means[j]:.4f}  "
-              f"OOD={per_scale_ood_means[j]:.4%}")
+              f"OOD={per_scale_ood_means[j]:.4%}  "
+              f"H={per_scale_entropy_means[j]:.4f}")
 
     # --- Pixel RMSE ---
     print("\nDecoding predicted tokens...")
@@ -456,6 +473,7 @@ def main():
     # --- Save per-timestep metrics ---
     per_scale_ce_arr = np.stack(all_per_scale_ce)      # (n_pairs, n_trainable)
     per_scale_ood_arr = np.stack(all_per_scale_ood)    # (n_pairs, n_trainable)
+    per_scale_entropy_arr = np.stack(all_per_scale_entropy)  # (n_pairs, n_trainable)
     scale_names = [f"{config.scales[idx][0]}x{config.scales[idx][1]}"
                    for idx in trainable_indices]
 
@@ -464,6 +482,7 @@ def main():
         cross_entropy=np.array(all_ce),             # (n_pairs,)
         per_scale_ce=per_scale_ce_arr,               # (n_pairs, n_trainable)
         per_scale_ood=per_scale_ood_arr,             # (n_pairs, n_trainable)
+        per_scale_entropy=per_scale_entropy_arr,     # (n_pairs, n_trainable)
         scale_names=np.array(scale_names),           # (n_trainable,)
         pixel_rmse=per_sample_rmse,                  # (n_pairs,)
         vqvae_pixel_rmse=per_sample_vqvae_rmse,      # (n_pairs,)
