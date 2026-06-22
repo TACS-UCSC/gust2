@@ -17,6 +17,7 @@ import jax.numpy as jnp
 import equinox as eqx
 
 from vit_ae import _rope_freqs, _apply_rope
+from samplers import sample_scale, SamplerConfig
 
 
 # =============================================================================
@@ -562,7 +563,9 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
                       top_k: int = 0,
                       top_p: float = 1.0,
                       log_topk: int = 0,
-                      position_mask: jax.Array = None):
+                      position_mask: jax.Array = None,
+                      sampler_cfg: SamplerConfig = None,
+                      anchor_array: jax.Array = None):
     """Generate a full t1 frame from t0, scale by scale.
 
     Runs one forward pass per trainable scale. Each scale k is predicted
@@ -602,6 +605,15 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
             each position to tokens ever seen at that exact (scale, row,
             col) during training. None disables (default; only scale_mask
             applies, matching original behavior).
+        sampler_cfg: optional SamplerConfig selecting the per-emission
+            sampler (samplers.sample_scale). None (default) synthesizes an
+            "ancestral" config from temperature/top_k/top_p above, so the
+            legacy decoding path is reproduced bit-for-bit.
+        anchor_array: optional (n_trainable,) per-scale target entropy (nats),
+            aligned to enumerate(trainable_indices). Required for
+            sampler_cfg.method in {"entropy_target", "top_h"+absolute}; None
+            otherwise. Threaded as a traced array (broadcast under the outer
+            trajectory vmap, not mapped).
 
     Returns:
         If log_topk == 0: (tokens_per_frame,) predicted t1 compact indices.
@@ -610,6 +622,13 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
             float32/int32 arrays; deterministic-scale slots (below
             trainable_indices[0]) are filled with zeros.
     """
+    # Back-compat: with no explicit sampler_cfg, reproduce the legacy decoding
+    # path (greedy / temperature+top_k+top_p) exactly from the positional args.
+    if sampler_cfg is None:
+        sampler_cfg = SamplerConfig(
+            method="ancestral", temperature=temperature,
+            top_k=top_k, top_p=top_p)
+
     boundaries = config.scale_boundaries
     tokens_per_frame = config.tokens_per_frame
     tokens_t1_trunc = sum(h * w for h, w in scales_t1)
@@ -632,10 +651,16 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
     t1_tokens = t1_tokens.at[:first_trainable_pos].set(
         t0_tokens[:first_trainable_pos])
 
-    if temperature == 0.0:
-        scale_keys = [None] * len(trainable_indices)
-    else:
+    # Only greedy ancestral decoding needs no RNG; every stochastic sampler
+    # consumes one split key per scale (preserves the legacy seed contract so
+    # ancestral runs reproduce bit-for-bit and seeds stay comparable across
+    # samplers).
+    needs_key = not (sampler_cfg.method == "ancestral"
+                     and sampler_cfg.temperature == 0.0)
+    if needs_key:
         scale_keys = list(jax.random.split(key, len(trainable_indices)))
+    else:
+        scale_keys = [None] * len(trainable_indices)
 
     if log_topk > 0:
         top_logits_full = jnp.zeros(
@@ -713,27 +738,11 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
                 top_indices_full, top_idx_k.astype(jnp.int32),
                 (tgt_start, 0))
 
-        if temperature == 0.0:
-            predicted = jnp.argmax(logits, axis=-1)
-        else:
-            if top_k > 0:
-                top_vals, _ = jax.lax.top_k(logits, top_k)
-                kth = top_vals[..., -1:]
-                logits = jnp.where(logits < kth, -1e9, logits)
-            if top_p < 1.0:
-                sorted_logits = jnp.sort(logits, axis=-1)[..., ::-1]
-                sorted_probs = jax.nn.softmax(
-                    sorted_logits / temperature, axis=-1)
-                cumprobs = jnp.cumsum(sorted_probs, axis=-1)
-                shifted = jnp.concatenate(
-                    [jnp.zeros_like(cumprobs[..., :1]),
-                     cumprobs[..., :-1]], axis=-1)
-                keep = shifted < top_p
-                kept = jnp.where(keep, sorted_logits, jnp.inf)
-                threshold = jnp.min(kept, axis=-1, keepdims=True)
-                logits = jnp.where(logits < threshold, -1e9, logits)
-            predicted = jax.random.categorical(
-                scale_keys[i], logits / temperature, axis=-1)
+        # Per-emission sampler dispatch (samplers.sample_scale). logits are
+        # already support-masked (scale_masks + optional position_mask). i is a
+        # Python int (unrolled loop) so anchor_array[i] is a static slice.
+        anchor_i = None if anchor_array is None else anchor_array[i]
+        predicted = sample_scale(logits, scale_keys[i], anchor_i, sampler_cfg)
 
         tgt_start = boundaries[scale_idx]
         tgt_end = boundaries[scale_idx + 1]

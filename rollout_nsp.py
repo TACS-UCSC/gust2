@@ -33,6 +33,7 @@ from nsp_model import (
     create_nsp_model, generate_t1_frame,
     build_teacher_forced_mask,
 )
+from samplers import SamplerConfig
 from tokenizer import load_tokenized_data, unflatten_to_scales
 
 
@@ -126,7 +127,71 @@ def parse_args():
                              "(same effective_vocab_size and new_to_old "
                              "mapping) as --tokens_path. None disables "
                              "(default; only per-scale masking applies).")
+    # --- Inference samplers (samplers.py). Default 'ancestral' == the legacy
+    #     temperature/top_k/top_p path, reproduced bit-for-bit. ---
+    parser.add_argument("--sampler", type=str, default="ancestral",
+                        choices=["ancestral", "entropy_target", "top_h",
+                                 "typical", "min_p", "inverted_edt"],
+                        help="Inference sampler. 'ancestral' (default) uses "
+                             "--temperature/--top_k/--top_p; the others ignore "
+                             "those. entropy_target = per-scale-anchored "
+                             "entropy homeostat (headline); top_h = Top-H "
+                             "bounded-entropy truncation; typical = locally "
+                             "typical; min_p / inverted_edt = negative controls.")
+    parser.add_argument("--base_temperature", type=float, default=1.0,
+                        help="top_h only: pre-warm factor before the entropy "
+                             "cap (>1 warms -> warm->cap variant).")
+    parser.add_argument("--top_h_alpha", type=float, default=0.4,
+                        help="top_h relative mode: keep set with renormalized "
+                             "entropy <= alpha * H(p).")
+    parser.add_argument("--top_h_mode", type=str, default="relative",
+                        choices=["relative", "absolute"],
+                        help="top_h bound: 'relative' (alpha*H(p)) or "
+                             "'absolute' (per-scale anchor; needs "
+                             "--entropy_anchor_path).")
+    parser.add_argument("--typical_tau", type=float, default=0.95,
+                        help="typical: cumulative typical-mass threshold.")
+    parser.add_argument("--min_p", type=float, default=0.05,
+                        help="min_p: keep tokens with p >= min_p * max_p.")
+    parser.add_argument("--inverted_edt_strength", type=float, default=0.5,
+                        help="inverted_edt: entropy-shrink strength in [0,1).")
+    parser.add_argument("--entropy_anchor_path", type=str, default=None,
+                        help="Per-scale entropy anchor JSON from "
+                             "measure_tokenizer_entropy.py. Required for "
+                             "--sampler entropy_target and for --sampler top_h "
+                             "--top_h_mode absolute. Must come from the same "
+                             "VQ-VAE/sc-config as the checkpoint.")
+    parser.add_argument("--anchor_stat", type=str, default="auto",
+                        choices=["auto", "pooled", "per_position"],
+                        help="Which T2 statistic anchors the sampler. 'auto' = "
+                             "pooled-marginal for entropy_target, "
+                             "mean-per-position for top_h absolute.")
     return parser.parse_args()
+
+
+def load_anchor_array(path, trainable_indices, stat):
+    """Load a per-scale entropy anchor JSON -> (n_trainable,) jnp float32 array.
+
+    The returned array aligns 1:1 with enumerate(trainable_indices) (the head
+    index i in generate_t1_frame). Asserts the anchor's trainable scales match
+    the model's, mirroring the VQ-mismatch guards above.
+    """
+    with open(path) as f:
+        anchor = json.load(f)
+    file_tr = [int(x) for x in anchor.get("trainable_scale_indices", [])]
+    cfg_tr = [int(x) for x in trainable_indices]
+    if file_tr != cfg_tr:
+        raise SystemExit(
+            f"Anchor/model trainable-scale mismatch: anchor {file_tr} vs "
+            f"model {cfg_tr} ({path}). Use an anchor from the same "
+            f"VQ-VAE/sc-config as the checkpoint.")
+    key = ("per_trainable_pooled_marginal_nats" if stat == "pooled"
+           else "per_trainable_mean_per_position_nats")
+    vals = anchor[key]
+    if len(vals) != len(cfg_tr):
+        raise SystemExit(
+            f"Anchor length {len(vals)} != n_trainable {len(cfg_tr)} ({path}).")
+    return jnp.asarray(vals, dtype=jnp.float32)
 
 
 def compute_token_accuracy(pred_tokens, gt_tokens, config):
@@ -299,6 +364,34 @@ def main():
     attn_bias = build_teacher_forced_mask(
         scales_t0, padded_t0, scales_t1, padded_t1)
 
+    # --- Sampler config + optional per-scale entropy anchor ---
+    # sampler_cfg is captured as a static closure (frozen dataclass -> hashable)
+    # so its branches resolve at trace time; anchor_array is a traced (n_trainable,)
+    # array broadcast (not vmapped) under the trajectory vmap.
+    needs_anchor = (args.sampler == "entropy_target"
+                    or (args.sampler == "top_h" and args.top_h_mode == "absolute"))
+    if args.anchor_stat == "auto":
+        anchor_stat = "per_position" if args.sampler == "top_h" else "pooled"
+    else:
+        anchor_stat = args.anchor_stat
+    anchor_array = None
+    if args.entropy_anchor_path is not None:
+        anchor_array = load_anchor_array(
+            args.entropy_anchor_path, trainable_indices, anchor_stat)
+    if needs_anchor and anchor_array is None:
+        raise SystemExit(
+            f"--sampler {args.sampler}"
+            + (" --top_h_mode absolute" if args.sampler == "top_h" else "")
+            + " requires --entropy_anchor_path (per-scale entropy anchor JSON "
+            "from measure_tokenizer_entropy.py).")
+    sampler_cfg = SamplerConfig(
+        method=args.sampler,
+        temperature=args.temperature, top_k=args.top_k, top_p=args.top_p,
+        base_temperature=args.base_temperature,
+        top_h_alpha=args.top_h_alpha, top_h_mode=args.top_h_mode,
+        typical_tau=args.typical_tau, min_p=args.min_p,
+        inverted_edt_strength=args.inverted_edt_strength)
+
     # Two launch modes:
     #  (default) trajectory ensemble: N trajectories share one start frame
     #    (args.start_frame); only the sampling seed varies. Exposes
@@ -373,6 +466,8 @@ def main():
             attn_bias, scale_masks, trainable_indices,
             key, temperature, top_k, top_p, log_topk,
             position_mask=position_mask,
+            sampler_cfg=sampler_cfg,
+            anchor_array=anchor_array,
         )
 
     @jax.jit
@@ -403,7 +498,24 @@ def main():
         return jnp.concatenate(outs, axis=0)
 
     # --- Rollout ---
-    if temperature == 0.0:
+    if args.sampler != "ancestral":
+        parts = [args.sampler]
+        if args.sampler == "entropy_target":
+            parts.append(f"anchor={anchor_stat}")
+        elif args.sampler == "top_h":
+            parts.append(f"mode={args.top_h_mode}")
+            parts.append(f"alpha={args.top_h_alpha}" if args.top_h_mode == "relative"
+                         else f"anchor={anchor_stat}")
+            if args.base_temperature != 1.0:
+                parts.append(f"warm={args.base_temperature}")
+        elif args.sampler == "typical":
+            parts.append(f"tau={args.typical_tau}")
+        elif args.sampler == "min_p":
+            parts.append(f"min_p={args.min_p}")
+        elif args.sampler == "inverted_edt":
+            parts.append(f"strength={args.inverted_edt_strength}")
+        decode_desc = ",".join(parts)
+    elif temperature == 0.0:
         decode_desc = "greedy"
     else:
         parts = [f"T={temperature}"]
@@ -559,6 +671,16 @@ def main():
         "start_frame": int(start_frames[0]),
         "log_topk": log_topk,
         "position_mask_used": bool(position_mask_np is not None),
+        "sampler": args.sampler,
+        "base_temperature": args.base_temperature,
+        "top_h_alpha": args.top_h_alpha,
+        "top_h_mode": args.top_h_mode,
+        "typical_tau": args.typical_tau,
+        "min_p": args.min_p,
+        "inverted_edt_strength": args.inverted_edt_strength,
+        "entropy_anchor_path": args.entropy_anchor_path,
+        "anchor_stat": anchor_stat,
+        "anchor_array": (anchor_array.tolist() if anchor_array is not None else None),
         "checkpoint_dir": args.checkpoint_dir,
         "tokens_path": args.tokens_path,
         "forecast_mode": bool(forecast_mode),
