@@ -130,12 +130,16 @@ def parse_args():
     # --- Inference samplers (samplers.py). Default 'ancestral' == the legacy
     #     temperature/top_k/top_p path, reproduced bit-for-bit. ---
     parser.add_argument("--sampler", type=str, default="ancestral",
-                        choices=["ancestral", "entropy_target", "top_h",
-                                 "typical", "min_p", "inverted_edt", "data_mix"],
+                        choices=["ancestral", "entropy_target", "per_scale_temp",
+                                 "top_h", "typical", "min_p", "inverted_edt",
+                                 "data_mix"],
                         help="Inference sampler. 'ancestral' (default) uses "
                              "--temperature/--top_k/--top_p; the others ignore "
                              "those. entropy_target = per-scale-anchored "
-                             "entropy homeostat; top_h = Top-H bounded-entropy "
+                             "entropy homeostat (online); per_scale_temp = "
+                             "static per-scale calibration temperature schedule "
+                             "(offline, from measure_calibration_temp.py); "
+                             "top_h = Top-H bounded-entropy "
                              "truncation; typical = locally typical; "
                              "min_p / inverted_edt = negative controls; "
                              "data_mix = convex mixture toward the per-scale "
@@ -403,7 +407,7 @@ def main():
     # sampler_cfg is captured as a static closure (frozen dataclass -> hashable)
     # so its branches resolve at trace time; anchor_array is a traced (n_trainable,)
     # array broadcast (not vmapped) under the trajectory vmap.
-    needs_anchor = (args.sampler in ("entropy_target", "data_mix")
+    needs_anchor = (args.sampler in ("entropy_target", "data_mix", "per_scale_temp")
                     or (args.sampler == "top_h" and args.top_h_mode == "absolute"))
     if args.anchor_stat == "auto":
         # data_mix / top_h use the conditional (per-position) anchor; the
@@ -420,9 +424,10 @@ def main():
         raise SystemExit(
             f"--sampler {args.sampler}"
             + (" --top_h_mode absolute" if args.sampler == "top_h" else "")
-            + " requires --entropy_anchor_path (per-scale entropy anchor JSON; "
+            + " requires --entropy_anchor_path (per-scale anchor JSON; "
             "for data_mix use the model-conditional anchor from "
-            "measure_model_entropy.py).")
+            "measure_model_entropy.py; for per_scale_temp use the calibration "
+            "temperature schedule from measure_calibration_temp.py).")
 
     # data_mix also needs the per-scale data-prior table (threaded like position_mask).
     data_prior_table = None
@@ -553,6 +558,8 @@ def main():
         parts = [args.sampler]
         if args.sampler == "entropy_target":
             parts.append(f"anchor={anchor_stat}")
+        elif args.sampler == "per_scale_temp":
+            parts.append("calib_schedule")
         elif args.sampler == "top_h":
             parts.append(f"mode={args.top_h_mode}")
             parts.append(f"alpha={args.top_h_alpha}" if args.top_h_mode == "relative"

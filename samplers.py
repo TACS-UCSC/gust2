@@ -60,7 +60,7 @@ class SamplerConfig:
     argument to `sample_scale`.
     """
 
-    method: str = "ancestral"          # ancestral|entropy_target|top_h|typical|min_p|inverted_edt|data_mix
+    method: str = "ancestral"          # ancestral|entropy_target|per_scale_temp|top_h|typical|min_p|inverted_edt|data_mix
 
     # -- ancestral (legacy temperature / top_k / top_p; back-compat) --
     temperature: float = 0.0           # 0.0 => greedy argmax
@@ -188,6 +188,31 @@ def _entropy_target(logits: jax.Array, key: jax.Array, anchor: jax.Array,
     tau = _solve_temperature(logits, jnp.asarray(anchor, jnp.float32), cfg)
     return jax.random.categorical(
         key, logits / tau[:, None], axis=-1).astype(jnp.int32)
+
+
+def _per_scale_temp(logits: jax.Array, key: jax.Array, anchor: jax.Array,
+                    cfg: SamplerConfig) -> jax.Array:
+    """Static per-scale temperature: apply a FIXED, precomputed T_k.
+
+    The offline sibling of `entropy_target`. Where `entropy_target` solves a
+    per-position temperature ONLINE every rollout step (bisection on the
+    drifting, possibly off-manifold free-running logits to hit an entropy
+    target), this applies a single per-scale temperature `T_k` computed ONCE
+    offline on CLEAN teacher-forced logits. See `measure_calibration_temp.py`:
+    T_k solves H(softmax(z / T_k)) = CE_k, where CE_k is the per-scale
+    validation cross-entropy (NLL = data entropy rate = H(p_model) + KL), not
+    the model's own (overconfident) predictive entropy. No bisection at rollout
+    time and no per-position state, so it cannot run away as the field drifts.
+
+    `anchor` is reinterpreted as a per-scale TEMPERATURE (> 0), not an entropy
+    target, but it travels through the identical anchor plumbing (the rollout's
+    `--entropy_anchor_path` -> `anchor_array[i]`). Support masking is already
+    baked into `logits` (invalid == -1e9), and -1e9 / T_k stays ~-1e9, so the
+    sample is always in support.
+    """
+    assert anchor is not None, "per_scale_temp requires an anchor (per-scale temperature T_k)"
+    tau = jnp.asarray(anchor, jnp.float32)
+    return jax.random.categorical(key, logits / tau, axis=-1).astype(jnp.int32)
 
 
 def _top_h_keep(logits: jax.Array, bound: jax.Array) -> jax.Array:
@@ -350,6 +375,8 @@ def sample_scale(logits: jax.Array, key: jax.Array, anchor, cfg: SamplerConfig,
         return _ancestral(logits, key, cfg)
     if m == "entropy_target":
         return _entropy_target(logits, key, anchor, cfg)
+    if m == "per_scale_temp":
+        return _per_scale_temp(logits, key, anchor, cfg)
     if m == "top_h":
         return _top_h(logits, key, anchor, cfg)
     if m == "typical":
@@ -397,6 +424,7 @@ def _selftest():
         "ancestral_T1": SamplerConfig(method="ancestral", temperature=1.0),
         "ancestral_tkp": SamplerConfig(method="ancestral", temperature=1.0, top_k=4, top_p=0.9),
         "entropy_target": SamplerConfig(method="entropy_target"),
+        "per_scale_temp": SamplerConfig(method="per_scale_temp"),
         "top_h_rel": SamplerConfig(method="top_h", top_h_mode="relative", top_h_alpha=0.4),
         "top_h_abs": SamplerConfig(method="top_h", top_h_mode="absolute"),
         "top_h_warmcap": SamplerConfig(method="top_h", top_h_mode="absolute", base_temperature=1.5),
@@ -407,7 +435,7 @@ def _selftest():
     for name, cfg in methods.items():
         for s in range(4):
             k = jax.random.fold_in(key0, s)
-            a = anchor if cfg.method in ("entropy_target",) or (
+            a = anchor if cfg.method in ("entropy_target", "per_scale_temp") or (
                 cfg.method == "top_h" and cfg.top_h_mode == "absolute") else None
             pred = sample_scale(logits, k, a, cfg)
             assert_in_support(pred, name)
@@ -423,6 +451,16 @@ def _selftest():
     got = sample_scale(logits, k, None, cfg1)
     assert bool(jnp.all(ref == got)), "ancestral T=1 not byte-identical to reference"
     print("[ok] ancestral back-compat (argmax + reference categorical)")
+
+    # (b2) per_scale_temp applies a fixed T_k == categorical(logits / T_k).
+    cfg_pst = SamplerConfig(method="per_scale_temp")
+    k = jax.random.fold_in(key0, 321)
+    Tk = jnp.float32(1.7)
+    ref_pst = jax.random.categorical(k, logits / Tk, axis=-1).astype(jnp.int32)
+    got_pst = sample_scale(logits, k, Tk, cfg_pst)
+    assert bool(jnp.all(ref_pst == got_pst)), "per_scale_temp != categorical(logits/T)"
+    assert_in_support(got_pst, "per_scale_temp")
+    print("[ok] per_scale_temp applies fixed T_k (matches categorical reference)")
 
     # (c) entropy_target hits the target within tolerance for in-range targets,
     #     and clamps gracefully out of range. Use smooth (unmasked) logits.

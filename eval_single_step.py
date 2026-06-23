@@ -103,12 +103,22 @@ def parse_args():
 def make_predict_and_loss(config, scales_t0, padded_len_t0,
                           scales_t1, padded_len_t1,
                           attn_bias, scale_masks, trainable_indices,
-                          temperature=0.0):
+                          temperature=0.0, temp_grid=None):
     """Build JIT-compiled function that predicts t1 and computes cross-entropy.
 
     Returns: fn(model, exp_heads, t0_tokens, t1_tokens)
              -> (predicted_tokens, cross_entropy, per_scale_ce)
+
+    If `temp_grid` is given (a 1-D array of temperatures), the returned function
+    additionally yields, per trainable scale, the mean-over-positions predictive
+    entropy H(softmax(logits / T)) evaluated at EACH grid temperature
+    (shape (n_trainable, G)). This curve is monotone increasing in T and lets a
+    caller invert H(softmax(z / T_k)) = CE_k for a per-scale calibration
+    temperature T_k on the REAL teacher-forced logits (no Gaussian proxy) — see
+    measure_calibration_temp.py. When `temp_grid is None` the return tuple is
+    unchanged (5 elements), so existing callers are unaffected.
     """
+    grid = None if temp_grid is None else jnp.asarray(temp_grid, dtype=jnp.float32)
     tokens_per_frame = config.tokens_per_frame
     tokens_t1_trunc = sum(h * w for h, w in scales_t1)
 
@@ -176,6 +186,7 @@ def make_predict_and_loss(config, scales_t0, padded_len_t0,
         per_scale_ce_list = []
         per_scale_ood_list = []
         per_scale_entropy_list = []
+        per_scale_grid_entropy_list = []
 
         for i, scale_idx in enumerate(trainable_indices):
             h_k, w_k = config.scales[scale_idx]
@@ -250,9 +261,24 @@ def make_predict_and_loss(config, scales_t0, padded_len_t0,
             ent_pos = -jnp.sum(probs * log_probs, axis=-1)   # (n_tokens_k,)
             per_scale_entropy_list.append(jnp.mean(ent_pos))
 
+            # Optional: mean predictive entropy at a grid of temperatures, from
+            # the SAME (support-masked) logits. H(softmax(z / T)) is monotone in
+            # T; inverting it against CE_k gives the per-scale calibration
+            # temperature. Support-masked entries (z == -1e9) stay ~0 prob at
+            # every positive T, contributing 0 (no NaN).
+            if grid is not None:
+                scaled = logits[None] / grid[:, None, None]     # (G, n_tokens_k, V)
+                lp_g = jax.nn.log_softmax(scaled, axis=-1)
+                H_g = -jnp.sum(jnp.exp(lp_g) * lp_g, axis=-1)   # (G, n_tokens_k)
+                per_scale_grid_entropy_list.append(jnp.mean(H_g, axis=-1))  # (G,)
+
         per_scale_ce = jnp.stack(per_scale_ce_list)
         per_scale_ood = jnp.stack(per_scale_ood_list)
         per_scale_entropy = jnp.stack(per_scale_entropy_list)
+        if grid is not None:
+            per_scale_grid_entropy = jnp.stack(per_scale_grid_entropy_list)  # (n_trainable, G)
+            return (predicted, total_ce, per_scale_ce, per_scale_ood,
+                    per_scale_entropy, per_scale_grid_entropy)
         return predicted, total_ce, per_scale_ce, per_scale_ood, per_scale_entropy
 
     return predict_and_loss

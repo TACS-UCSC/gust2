@@ -83,6 +83,9 @@ walltime_for() {
 # ---------- Sampler arms: "label|anchor_src|needs_prior|flags" ----------
 # anchor_src: tok = tokenizer marginal entropy (measure_tokenizer_entropy.py),
 #             model = model teacher-forced conditional entropy (measure_model_entropy.py),
+#             calib = per-scale CALIBRATION temperature schedule (measure_calibration_temp.py;
+#                     anchors to the cross-entropy, not the predictive entropy -> warms with
+#                     token count; GATE offline first with sweep_calibration_gate.sh),
 #             none = no anchor. The model anchor is the principled one (the
 #             marginal over-warms cold-optimal sc341 into over-diffusion).
 # needs_prior: 1 = also build the per-scale data-prior table (data_mix only).
@@ -99,6 +102,7 @@ ARMS=(
     "minp|none|0|--sampler min_p --min_p 0.05"
     "invedt|none|0|--sampler inverted_edt --inverted_edt_strength 0.5"
     "data_mix|model|1|--sampler data_mix --anchor_stat per_position"
+    "calibT|calib|0|--sampler per_scale_temp --anchor_stat pooled"
 )
 
 # ---------- Sweep grid (matches sweep_scaling_tempopt_n128.sh) ----------
@@ -312,6 +316,11 @@ else
         echo "---- building ${ANCHOR_SRC} anchor: ${ANCHOR} ----"
         if [ "${ANCHOR_SRC}" = "model" ]; then
             python measure_model_entropy.py --checkpoint_dir "${CHECKPOINT_DIR}" --tokens_path "${VAL_TOKENS}" --output "${ANCHOR}" --max_pairs 256
+        elif [ "${ANCHOR_SRC}" = "calib" ]; then
+            # per-scale CALIBRATION temperature schedule T_k (per_scale_temp arm).
+            # Anchor slots hold T_k (a temperature), not an entropy. GATE this
+            # offline first (sweep_calibration_gate.sh) before running this arm.
+            python measure_calibration_temp.py --checkpoint_dir "${CHECKPOINT_DIR}" --tokens_path "${VAL_TOKENS}" --output "${ANCHOR}" --max_pairs 256
         else
             python measure_tokenizer_entropy.py --tokens_path "${TRAIN_TOKENS}" --output "${ANCHOR}"
         fi
