@@ -35,8 +35,9 @@ ENTITY = "bigpseud-ucsc"
 SIZES = ["small", "medium", "large"]
 SCS = ["sc341", "sc917", "sc1941"]
 
-ARMS = ["etmodel", "etpool", "etpos", "tophabs", "typical", "minp", "invedt"]
+ARMS = ["data_mix", "etmodel", "etpool", "etpos", "tophabs", "typical", "minp", "invedt"]
 ARM_LABEL = {
+    "data_mix": "data-mix (on-manifold)",
     "etmodel": "entropy-target (model H)",
     "etpool": "entropy-target (pooled)",
     "etpos": "entropy-target (per-pos)",
@@ -47,6 +48,7 @@ ARM_LABEL = {
 }
 # (color, marker, linestyle)
 ARM_STYLE = {
+    "data_mix": ("C8", "*", "-"),
     "etmodel": ("C6", "P", "-"),
     "etpool": ("C2", "o", "-"),
     "etpos": ("C0", "s", "-"),
@@ -55,9 +57,11 @@ ARM_STYLE = {
     "minp": ("C3", "v", ":"),
     "invedt": ("C5", "x", ":"),
 }
-# etmodel (model conditional-entropy anchor) is the principled headline — the
-# tokenizer-marginal anchor (etpool) over-warms cold-optimal sc341.
-HEADLINE_ARM = "etmodel"
+# data_mix (convex mixture toward the per-scale data prior, gated by the model
+# conditional anchor) is the current headline candidate — on-manifold diversity
+# injection that should fix over-diffusion while still warming the collapse-prone
+# configs. etmodel is the prior best (cold-only win).
+HEADLINE_ARM = "data_mix"
 
 
 def label_to_params_M(label):

@@ -147,10 +147,45 @@ def _selftest():
     print("[ok] T2 self-test passed (H=0 single-code, H=log2 uniform-2, alignment)")
 
 
+def build_data_prior(tokens_path: str) -> dict:
+    """Per-scale pooled empirical code distribution, tiled to (tokens_per_frame, V).
+
+    For each scale, the distribution is the pooled code histogram over ALL
+    positions+frames at that scale (well-sampled, unlike the noisy per-position
+    frequencies), tiled across the scale's positions so the array is
+    SHAPE-IDENTICAL to the position support mask and threads through the rollout
+    the same way. The data_mix sampler restricts it to each position's support
+    at sample time. Returns a dict of arrays for np.savez.
+    """
+    d = np.load(tokens_path, allow_pickle=True)
+    idx = np.asarray(d["indices_flat"])
+    V = int(d["effective_vocab_size"])
+    scales = [int(s) for s in np.asarray(d["scales"]).ravel()]
+    cps = [s * s for s in scales]
+    bnd = np.concatenate([[0], np.cumsum(cps)]).astype(int)
+    table = np.zeros((int(sum(cps)), V), dtype=np.float32)
+    for k, s in enumerate(scales):
+        block = idx[:, bnd[k]:bnd[k + 1]]
+        pooled = np.bincount(block.ravel(), minlength=V).astype(np.float64)
+        g = (pooled / pooled.sum()).astype(np.float32)
+        table[bnd[k]:bnd[k + 1], :] = g[None, :]
+    first_trainable = int(d["first_trainable_scale"]) if "first_trainable_scale" in d.files else 0
+    return {
+        "data_prior": table,                                  # (tokens_per_frame, V) f32
+        "scales": np.array(scales),
+        "effective_vocab_size": np.int64(V),
+        "new_to_old": np.asarray(d["new_to_old"]),
+        "first_trainable_scale": np.int64(first_trainable),
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tokens_path", type=str, help="tokenized .npz")
     ap.add_argument("--output", type=str, help="output anchor .json")
+    ap.add_argument("--data_prior_out", type=str, default=None,
+                    help="If set, also write the per-scale data-prior table "
+                         "(.npz) consumed by the data_mix sampler.")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
@@ -158,8 +193,19 @@ def main():
         _selftest()
         return
 
-    if not args.tokens_path or not args.output:
-        ap.error("--tokens_path and --output are required (or use --selftest)")
+    if not args.tokens_path or not (args.output or args.data_prior_out):
+        ap.error("--tokens_path and at least one of --output / --data_prior_out "
+                 "are required (or use --selftest)")
+
+    if args.data_prior_out:
+        prior = build_data_prior(args.tokens_path)
+        np.savez(args.data_prior_out, **prior)
+        t = prior["data_prior"]
+        print(f"wrote {args.data_prior_out}  data_prior shape={t.shape} "
+              f"V={int(prior['effective_vocab_size'])}  scales={list(prior['scales'])}")
+
+    if not args.output:
+        return
 
     anchor = build_anchor(args.tokens_path)
     with open(args.output, "w") as f:

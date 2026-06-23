@@ -565,7 +565,8 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
                       log_topk: int = 0,
                       position_mask: jax.Array = None,
                       sampler_cfg: SamplerConfig = None,
-                      anchor_array: jax.Array = None):
+                      anchor_array: jax.Array = None,
+                      data_prior_table: jax.Array = None):
     """Generate a full t1 frame from t0, scale by scale.
 
     Runs one forward pass per trainable scale. Each scale k is predicted
@@ -742,7 +743,11 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
         # already support-masked (scale_masks + optional position_mask). i is a
         # Python int (unrolled loop) so anchor_array[i] is a static slice.
         anchor_i = None if anchor_array is None else anchor_array[i]
-        predicted = sample_scale(logits, scale_keys[i], anchor_i, sampler_cfg)
+        d_block = (None if data_prior_table is None
+                   else data_prior_table[boundaries[scale_idx]:
+                                         boundaries[scale_idx + 1], :])
+        predicted = sample_scale(logits, scale_keys[i], anchor_i, sampler_cfg,
+                                 d_block=d_block)
 
         tgt_start = boundaries[scale_idx]
         tgt_end = boundaries[scale_idx + 1]

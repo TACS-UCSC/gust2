@@ -80,21 +80,25 @@ walltime_for() {
     esac
 }
 
-# ---------- Sampler arms: "label|anchor_src|flags" ----------
+# ---------- Sampler arms: "label|anchor_src|needs_prior|flags" ----------
 # anchor_src: tok = tokenizer marginal entropy (measure_tokenizer_entropy.py),
 #             model = model teacher-forced conditional entropy (measure_model_entropy.py),
 #             none = no anchor. The model anchor is the principled one (the
 #             marginal over-warms cold-optimal sc341 into over-diffusion).
+# needs_prior: 1 = also build the per-scale data-prior table (data_mix only).
+# data_mix = convex mixture toward the per-scale data prior, gated by the model
+#   conditional anchor (anchor_src=model) -> injects ON-MANIFOLD diversity.
 # Non-ancestral samplers ignore --temperature, but we pass --temperature 1.0
 # everywhere to respect the project's "never invoke rollout greedy" convention.
 ARMS=(
-    "etpool|tok|--sampler entropy_target --anchor_stat pooled"
-    "etpos|tok|--sampler entropy_target --anchor_stat per_position"
-    "etmodel|model|--sampler entropy_target --anchor_stat per_position"
-    "tophabs|tok|--sampler top_h --top_h_mode absolute --anchor_stat per_position"
-    "typical|none|--sampler typical --typical_tau 0.95"
-    "minp|none|--sampler min_p --min_p 0.05"
-    "invedt|none|--sampler inverted_edt --inverted_edt_strength 0.5"
+    "etpool|tok|0|--sampler entropy_target --anchor_stat pooled"
+    "etpos|tok|0|--sampler entropy_target --anchor_stat per_position"
+    "etmodel|model|0|--sampler entropy_target --anchor_stat per_position"
+    "tophabs|tok|0|--sampler top_h --top_h_mode absolute --anchor_stat per_position"
+    "typical|none|0|--sampler typical --typical_tau 0.95"
+    "minp|none|0|--sampler min_p --min_p 0.05"
+    "invedt|none|0|--sampler inverted_edt --inverted_edt_strength 0.5"
+    "data_mix|model|1|--sampler data_mix --anchor_stat per_position"
 )
 
 # ---------- Sweep grid (matches sweep_scaling_tempopt_n128.sh) ----------
@@ -178,8 +182,8 @@ if [ "${LIST_ONLY}" = true ]; then
     echo "Inference-sampler sweep — N=${N_TRAJ}, posmask ON, sampler-arm axis:"
     echo "  Arms:"
     for armspec in "${ARMS[@]}"; do
-        IFS='|' read -r ARM SRC FLAGS <<< "${armspec}"
-        printf "    %-9s anchor_src=%-6s %s\n" "${ARM}" "${SRC}" "${FLAGS}"
+        IFS='|' read -r ARM SRC PRIOR FLAGS <<< "${armspec}"
+        printf "    %-9s anchor_src=%-6s prior=%s  %s\n" "${ARM}" "${SRC}" "${PRIOR}" "${FLAGS}"
     done
     echo ""
     echo "  Brackets per sc:"
@@ -190,7 +194,7 @@ if [ "${LIST_ONLY}" = true ]; then
     echo ""
     n_cells=0
     for SIZE in "${SIZES[@]}"; do for spec in "${TASKS[@]}"; do n_cells=$((n_cells+1)); done; done
-    n_arms=0; for armspec in "${ARMS[@]}"; do IFS='|' read -r ARM _ _ <<< "${armspec}"; arm_selected "${ARM}" && n_arms=$((n_arms+1)); done
+    n_arms=0; for armspec in "${ARMS[@]}"; do IFS='|' read -r ARM _ _ _ <<< "${armspec}"; arm_selected "${ARM}" && n_arms=$((n_arms+1)); done
     echo "  Cells:      ${n_cells}  (sizes: ${SIZES[*]})  x arms: ${n_arms}"
     echo "  Wandb:      ${WANDB_PROJECT_PREFIX}-{small,medium,large}, group=<sc>, run=<cell>-<arm>"
     echo "  Output base:${SAMPLERS_BASE}"
@@ -247,17 +251,22 @@ for SIZE in "${SIZES[@]}"; do
         fi
 
         for armspec in "${ARMS[@]}"; do
-            IFS='|' read -r ARM ANCHOR_SRC ARM_FLAGS <<< "${armspec}"
+            IFS='|' read -r ARM ANCHOR_SRC NEEDS_PRIOR ARM_FLAGS <<< "${armspec}"
             arm_selected "${ARM}" || continue
 
             ARM_DIR="${CELL_DIR}/${ARM}"
             ROUT="${ARM_DIR}/rollout"
             AOUT="${ARM_DIR}/analysis"
             ANCHOR="${ARM_DIR}/anchor.json"
+            PRIOR="${ARM_DIR}/data_prior.npz"
 
             ANCHOR_FLAG=""
             if [ "${ANCHOR_SRC}" != "none" ]; then
                 ANCHOR_FLAG="--entropy_anchor_path ${ANCHOR}"
+            fi
+            PRIOR_FLAG=""
+            if [ "${NEEDS_PRIOR}" = "1" ]; then
+                PRIOR_FLAG="--data_prior_path ${PRIOR}"
             fi
 
             TMPFILE="$(mktemp /tmp/samp_${RUN_NAME}_${ARM}_XXXXXX.sbatch)"
@@ -286,7 +295,7 @@ export LD_LIBRARY_PATH=\$(find \$NVIDIA_LIBS -name "lib" -type d | tr '\\n' ':')
 echo "=========================================="
 echo "Job:    \${SLURM_JOB_ID}   Node: \$(hostname)   Started: \$(date)"
 echo "Cell:   ${RUN_NAME}   Arm: ${ARM}   (N=${N_TRAJ}, ic_chunk=${IC_CHUNK}, posmask ON)"
-echo "Flags:  ${ARM_FLAGS} ${ANCHOR_FLAG}"
+echo "Flags:  ${ARM_FLAGS} ${ANCHOR_FLAG} ${PRIOR_FLAG}"
 echo "Wandb:  ${WANDB_PROJECT} / group=${WANDB_GROUP} / run=${RUN_NAME}-${ARM}"
 echo "=========================================="
 
@@ -308,6 +317,12 @@ else
         fi
     fi
 
+    # data_mix: per-scale data-prior table from the cell's TRAIN tokens (cheap, numpy).
+    if [ -n "${PRIOR_FLAG}" ] && [ ! -f "${PRIOR}" ]; then
+        echo "---- building data prior: ${PRIOR} ----"
+        python measure_tokenizer_entropy.py --tokens_path "${TRAIN_TOKENS}" --data_prior_out "${PRIOR}"
+    fi
+
     if [ -f "${ROUT}/rollout_tokens.npz" ]; then
         echo "[reuse] ${ARM}: rollout exists, running analysis only"
     else
@@ -321,7 +336,7 @@ else
             --ic_chunk ${IC_CHUNK} \\
             --seed ${SEED} \\
             --temperature 1.0 \\
-            ${ARM_FLAGS} ${ANCHOR_FLAG} \\
+            ${ARM_FLAGS} ${ANCHOR_FLAG} ${PRIOR_FLAG} \\
             --output_dir "${ROUT}"
     fi
 
@@ -342,7 +357,7 @@ echo "Finished: \$(date)"
 SBATCH_EOF
 
             if [ "${DRY_RUN}" = true ]; then
-                echo "[dry-run] ${RUN_NAME} arm=${ARM}  N=${N_TRAJ} ic_chunk=${IC_CHUNK} walltime=${WALLTIME}  flags='${ARM_FLAGS} ${ANCHOR_FLAG}'"
+                echo "[dry-run] ${RUN_NAME} arm=${ARM}  N=${N_TRAJ} ic_chunk=${IC_CHUNK} walltime=${WALLTIME}  flags='${ARM_FLAGS} ${ANCHOR_FLAG} ${PRIOR_FLAG}'"
             else
                 echo "Submitting ${RUN_NAME} arm=${ARM} (N=${N_TRAJ})..."
                 JOBID=$(sbatch --parsable "${TMPFILE}")

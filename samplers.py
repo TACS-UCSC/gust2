@@ -60,7 +60,7 @@ class SamplerConfig:
     argument to `sample_scale`.
     """
 
-    method: str = "ancestral"          # ancestral|entropy_target|top_h|typical|min_p|inverted_edt
+    method: str = "ancestral"          # ancestral|entropy_target|top_h|typical|min_p|inverted_edt|data_mix
 
     # -- ancestral (legacy temperature / top_k / top_p; back-compat) --
     temperature: float = 0.0           # 0.0 => greedy argmax
@@ -86,6 +86,11 @@ class SamplerConfig:
     # -- inverted_edt (negative control) --
     inverted_edt_strength: float = 0.5
     inverted_edt_tau_min: float = 0.1
+
+    # -- data_mix (convex mixture toward the per-scale data prior) --
+    mix_gain: float = 1.0              # single global knob: gain on the confidence-deficit gate
+    mix_lam_max: float = 1.0           # hard cap on injected fraction (1.0 = parameter-free)
+    mix_eps: float = 1e-30
 
 
 # =============================================================================
@@ -280,12 +285,50 @@ def _inverted_edt(logits: jax.Array, key: jax.Array, cfg: SamplerConfig) -> jax.
         key, logits / tau[:, None], axis=-1).astype(jnp.int32)
 
 
+def _data_mix(logits, key, d_block, anchor, cfg):
+    """Convex mixture toward the per-scale data prior, confidence-deficit gated.
+
+    p_sample = (1 - lambda) * p_model + lambda * d_support,  where
+      * d_support = the per-scale pooled data prior d_block restricted to THIS
+        position's support and renormalized (ON-MANIFOLD by construction -- the
+        injected codes are real codes the data uses at this scale, never the
+        model's warmed tail), and
+      * lambda = mix_gain * relu(H_cond - H_model) / H_cond, clipped to
+        [0, mix_lam_max], where H_cond = anchor = the MODEL's teacher-forced
+        per-scale CONDITIONAL entropy (the etmodel anchor, ~1 nat). The gate
+        fires only where the rollout model has over-collapsed BELOW its own
+        teacher-forced confidence -- so on a calibrated/cold config (sc341)
+        H_model ~ H_cond -> lambda ~ 0 -> pure model (the known cold optimum),
+        and it injects on-manifold diversity only where the model drifts into
+        the confidence trap.
+
+    Arithmetic (convex) mixing is deliberate: it is the unique blend whose
+    entropy dials monotonically from the model conditional up to the data
+    marginal (geometric/product blends saturate well below the warm target).
+    """
+    assert anchor is not None, "data_mix requires an anchor (per-scale conditional entropy)"
+    assert d_block is not None, "data_mix requires d_block (per-scale data prior)"
+    q = jax.nn.softmax(logits, axis=-1)                         # (T,V) p_model, masked
+    # Restrict the per-scale prior to this position's applied support, renorm.
+    smask = logits > (NEG * 0.5)                                # (T,V) bool support
+    dr = jnp.where(smask, d_block, 0.0)
+    dr = dr / jnp.clip(jnp.sum(dr, axis=-1, keepdims=True), cfg.mix_eps, None)
+    Hq = _entropy_from_probs(q, axis=-1)                        # (T,) model entropy
+    Htar = jnp.broadcast_to(jnp.asarray(anchor, jnp.float32), Hq.shape)
+    excess = jax.nn.relu(Htar - Hq) / jnp.clip(Htar, cfg.mix_eps, None)   # (T,) in [0,1)
+    lam = jnp.clip(cfg.mix_gain * excess, 0.0, cfg.mix_lam_max)[:, None]  # (T,1)
+    ps = (1.0 - lam) * q + lam * dr                            # convex, on-support
+    return jax.random.categorical(
+        key, jnp.log(jnp.clip(ps, cfg.mix_eps, 1.0)), axis=-1).astype(jnp.int32)
+
+
 # =============================================================================
 # Dispatch
 # =============================================================================
 
 
-def sample_scale(logits: jax.Array, key: jax.Array, anchor, cfg: SamplerConfig) -> jax.Array:
+def sample_scale(logits: jax.Array, key: jax.Array, anchor, cfg: SamplerConfig,
+                 d_block: jax.Array = None) -> jax.Array:
     """Sample one scale's tokens.
 
     Args:
@@ -293,8 +336,11 @@ def sample_scale(logits: jax.Array, key: jax.Array, anchor, cfg: SamplerConfig) 
             (invalid entries == -1e9).
         key: PRNGKey, or None only when method=='ancestral' and temperature==0.
         anchor: scalar per-scale target entropy (nats) for entropy_target /
-            top_h-absolute; None otherwise.
+            top_h-absolute / data_mix (gate target); None otherwise.
         cfg: SamplerConfig (static).
+        d_block: (n_tokens_k, effective_vocab) per-scale data prior for
+            data_mix (the scale's pooled empirical code distribution, broadcast
+            across the scale's rows); None otherwise.
 
     Returns:
         (n_tokens_k,) int32 predicted token ids — always in support.
@@ -312,6 +358,8 @@ def sample_scale(logits: jax.Array, key: jax.Array, anchor, cfg: SamplerConfig) 
         return _min_p(logits, key, cfg)
     if m == "inverted_edt":
         return _inverted_edt(logits, key, cfg)
+    if m == "data_mix":
+        return _data_mix(logits, key, d_block, anchor, cfg)
     raise ValueError(f"unknown sampler method: {m!r}")
 
 
@@ -440,6 +488,29 @@ def _selftest():
         ok = support_j[jnp.arange(T), out_jv[r]]
         assert bool(jnp.all(ok)), "jit+vmap produced OOS token"
     print("[ok] jit + vmap consistent with unjitted path")
+
+    # (f) data_mix: in-support; gate off (Hq>=Htar) => pure model; warm anchor
+    #     => injects the data prior; lam grows as the model sharpens.
+    d_block = jnp.where(support_j, 1.0, 0.0)
+    d_block = d_block / jnp.sum(d_block, axis=-1, keepdims=True)   # uniform-on-support prior
+    cfg_dm = SamplerConfig(method="data_mix", mix_gain=1.0)
+    for s in range(4):
+        k = jax.random.fold_in(key0, 700 + s)
+        pred = sample_scale(logits, k, jnp.float32(0.5), cfg_dm, d_block=d_block)
+        assert_in_support(pred, "data_mix")
+    # gate-off: a target below the model entropy everywhere => lam==0 => matches
+    # a pure-model categorical on the same key.
+    low_anchor = jnp.float32(1e-6)
+    k = jax.random.fold_in(key0, 4242)
+    dm_off = sample_scale(logits, k, low_anchor, cfg_dm, d_block=d_block)
+    model_only = jax.random.categorical(k, logits, axis=-1).astype(jnp.int32)
+    assert bool(jnp.all(dm_off == model_only)), "data_mix lam==0 != pure model"
+    # internal: lam is larger for a sharper (lower-entropy) row at a fixed warm anchor
+    sharp = jnp.asarray(np.where(support, base * 8.0, -1e9), dtype=jnp.float32)
+    Hsharp = _entropy_from_probs(jax.nn.softmax(sharp, -1), -1)
+    Hsoft = _entropy_from_probs(jax.nn.softmax(logits, -1), -1)
+    assert float(jnp.mean(Hsharp)) < float(jnp.mean(Hsoft)), "sanity: sharp< soft entropy"
+    print("[ok] data_mix in-support; lam==0 recovers pure model; on-manifold by support")
 
     print("\nALL SAMPLER SELF-TESTS PASSED")
 

@@ -131,13 +131,17 @@ def parse_args():
     #     temperature/top_k/top_p path, reproduced bit-for-bit. ---
     parser.add_argument("--sampler", type=str, default="ancestral",
                         choices=["ancestral", "entropy_target", "top_h",
-                                 "typical", "min_p", "inverted_edt"],
+                                 "typical", "min_p", "inverted_edt", "data_mix"],
                         help="Inference sampler. 'ancestral' (default) uses "
                              "--temperature/--top_k/--top_p; the others ignore "
                              "those. entropy_target = per-scale-anchored "
-                             "entropy homeostat (headline); top_h = Top-H "
-                             "bounded-entropy truncation; typical = locally "
-                             "typical; min_p / inverted_edt = negative controls.")
+                             "entropy homeostat; top_h = Top-H bounded-entropy "
+                             "truncation; typical = locally typical; "
+                             "min_p / inverted_edt = negative controls; "
+                             "data_mix = convex mixture toward the per-scale "
+                             "data prior, confidence-deficit gated (needs "
+                             "--data_prior_path + a model-conditional "
+                             "--entropy_anchor_path).")
     parser.add_argument("--base_temperature", type=float, default=1.0,
                         help="top_h only: pre-warm factor before the entropy "
                              "cap (>1 warms -> warm->cap variant).")
@@ -166,6 +170,16 @@ def parse_args():
                         help="Which T2 statistic anchors the sampler. 'auto' = "
                              "pooled-marginal for entropy_target, "
                              "mean-per-position for top_h absolute.")
+    parser.add_argument("--data_prior_path", type=str, default=None,
+                        help="Per-scale data-prior .npz (data_prior table) from "
+                             "measure_tokenizer_entropy.py --data_prior_out. "
+                             "Required for --sampler data_mix. Must share the "
+                             "VQ-VAE/effective_vocab of --tokens_path.")
+    parser.add_argument("--mix_gain", type=float, default=1.0,
+                        help="data_mix: gain on the confidence-deficit gate "
+                             "(single global knob; 1.0 = parameter-free).")
+    parser.add_argument("--mix_lam_max", type=float, default=1.0,
+                        help="data_mix: cap on the injected data-prior fraction.")
     return parser.parse_args()
 
 
@@ -192,6 +206,27 @@ def load_anchor_array(path, trainable_indices, stat):
         raise SystemExit(
             f"Anchor length {len(vals)} != n_trainable {len(cfg_tr)} ({path}).")
     return jnp.asarray(vals, dtype=jnp.float32)
+
+
+def load_data_prior(path, token_data):
+    """Load the per-scale data-prior table -> (tokens_per_frame, V) jnp float32.
+
+    Threaded into generate_t1_frame exactly like position_mask. Guards that it
+    shares the val tokens' effective vocab and frame layout (same VQ-VAE).
+    """
+    d = np.load(path, allow_pickle=True)
+    table = np.asarray(d["data_prior"])
+    V_prior = int(d["effective_vocab_size"])
+    V_val = int(token_data["effective_vocab_size"])
+    P = int(sum(s * s for s in token_data["scales"]))
+    if V_prior != V_val:
+        raise SystemExit(
+            f"data_prior V={V_prior} != val tokens V={V_val} ({path}); build "
+            f"the prior from train tokens of the same VQ-VAE as --tokens_path.")
+    if table.shape != (P, V_val):
+        raise SystemExit(
+            f"data_prior shape {table.shape} != expected ({P}, {V_val}) ({path}).")
+    return jnp.asarray(table, dtype=jnp.float32)
 
 
 def compute_token_accuracy(pred_tokens, gt_tokens, config):
@@ -368,10 +403,13 @@ def main():
     # sampler_cfg is captured as a static closure (frozen dataclass -> hashable)
     # so its branches resolve at trace time; anchor_array is a traced (n_trainable,)
     # array broadcast (not vmapped) under the trajectory vmap.
-    needs_anchor = (args.sampler == "entropy_target"
+    needs_anchor = (args.sampler in ("entropy_target", "data_mix")
                     or (args.sampler == "top_h" and args.top_h_mode == "absolute"))
     if args.anchor_stat == "auto":
-        anchor_stat = "per_position" if args.sampler == "top_h" else "pooled"
+        # data_mix / top_h use the conditional (per-position) anchor; the
+        # entropy_target homeostat defaults to the pooled-marginal warm target.
+        anchor_stat = ("per_position"
+                       if args.sampler in ("top_h", "data_mix") else "pooled")
     else:
         anchor_stat = args.anchor_stat
     anchor_array = None
@@ -382,15 +420,27 @@ def main():
         raise SystemExit(
             f"--sampler {args.sampler}"
             + (" --top_h_mode absolute" if args.sampler == "top_h" else "")
-            + " requires --entropy_anchor_path (per-scale entropy anchor JSON "
-            "from measure_tokenizer_entropy.py).")
+            + " requires --entropy_anchor_path (per-scale entropy anchor JSON; "
+            "for data_mix use the model-conditional anchor from "
+            "measure_model_entropy.py).")
+
+    # data_mix also needs the per-scale data-prior table (threaded like position_mask).
+    data_prior_table = None
+    if args.data_prior_path is not None:
+        data_prior_table = load_data_prior(args.data_prior_path, token_data)
+    if args.sampler == "data_mix" and data_prior_table is None:
+        raise SystemExit(
+            "--sampler data_mix requires --data_prior_path (per-scale data "
+            "prior .npz from measure_tokenizer_entropy.py --data_prior_out).")
+
     sampler_cfg = SamplerConfig(
         method=args.sampler,
         temperature=args.temperature, top_k=args.top_k, top_p=args.top_p,
         base_temperature=args.base_temperature,
         top_h_alpha=args.top_h_alpha, top_h_mode=args.top_h_mode,
         typical_tau=args.typical_tau, min_p=args.min_p,
-        inverted_edt_strength=args.inverted_edt_strength)
+        inverted_edt_strength=args.inverted_edt_strength,
+        mix_gain=args.mix_gain, mix_lam_max=args.mix_lam_max)
 
     # Two launch modes:
     #  (default) trajectory ensemble: N trajectories share one start frame
@@ -468,6 +518,7 @@ def main():
             position_mask=position_mask,
             sampler_cfg=sampler_cfg,
             anchor_array=anchor_array,
+            data_prior_table=data_prior_table,
         )
 
     @jax.jit
@@ -514,6 +565,9 @@ def main():
             parts.append(f"min_p={args.min_p}")
         elif args.sampler == "inverted_edt":
             parts.append(f"strength={args.inverted_edt_strength}")
+        elif args.sampler == "data_mix":
+            parts.append(f"gain={args.mix_gain}")
+            parts.append(f"lam_max={args.mix_lam_max}")
         decode_desc = ",".join(parts)
     elif temperature == 0.0:
         decode_desc = "greedy"
@@ -678,6 +732,9 @@ def main():
         "typical_tau": args.typical_tau,
         "min_p": args.min_p,
         "inverted_edt_strength": args.inverted_edt_strength,
+        "mix_gain": args.mix_gain,
+        "mix_lam_max": args.mix_lam_max,
+        "data_prior_path": args.data_prior_path,
         "entropy_anchor_path": args.entropy_anchor_path,
         "anchor_stat": anchor_stat,
         "anchor_array": (anchor_array.tolist() if anchor_array is not None else None),
