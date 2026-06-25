@@ -127,6 +127,10 @@ LOG_DIR="${GATE_BASE}/logs"
 CELL_ARGS=""
 for c in "${CELLS[@]}"; do CELL_ARGS+=" ${c}"; done
 
+# The Slurm -o/-e directory MUST exist before the job launches, else the job
+# FAILS in seconds with no log. (The in-job mkdir is too late for this.)
+if [ "${DRY_RUN}" = false ]; then mkdir -p "${LOG_DIR}"; fi
+
 TMPFILE="$(mktemp /tmp/calib_gate_XXXXXX.sbatch)"
 cat > "${TMPFILE}" << SBATCH_EOF
 #!/bin/bash
