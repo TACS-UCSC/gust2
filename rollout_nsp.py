@@ -131,8 +131,8 @@ def parse_args():
     #     temperature/top_k/top_p path, reproduced bit-for-bit. ---
     parser.add_argument("--sampler", type=str, default="ancestral",
                         choices=["ancestral", "entropy_target", "per_scale_temp",
-                                 "top_h", "typical", "min_p", "inverted_edt",
-                                 "data_mix"],
+                                 "drift_warm", "top_h", "typical", "min_p",
+                                 "inverted_edt", "data_mix"],
                         help="Inference sampler. 'ancestral' (default) uses "
                              "--temperature/--top_k/--top_p; the others ignore "
                              "those. entropy_target = per-scale-anchored "
@@ -184,6 +184,15 @@ def parse_args():
                              "(single global knob; 1.0 = parameter-free).")
     parser.add_argument("--mix_lam_max", type=float, default=1.0,
                         help="data_mix: cap on the injected data-prior fraction.")
+    parser.add_argument("--drift_gain", type=float, default=2.5,
+                        help="drift_warm: overshoot factor on the live entropy "
+                             "deficit vs the teacher-forced H_ref anchor "
+                             "(1.0 == etmodel restore-to-H_ref).")
+    parser.add_argument("--drift_tmax", type=float, default=3.0,
+                        help="drift_warm: hard cap on the applied temperature.")
+    parser.add_argument("--drift_tau_floor", type=float, default=1.0,
+                        help="drift_warm: warm-only temperature floor (>=1); "
+                             "raise to 1.1-1.3 for an always-warm floor.")
     return parser.parse_args()
 
 
@@ -407,13 +416,15 @@ def main():
     # sampler_cfg is captured as a static closure (frozen dataclass -> hashable)
     # so its branches resolve at trace time; anchor_array is a traced (n_trainable,)
     # array broadcast (not vmapped) under the trajectory vmap.
-    needs_anchor = (args.sampler in ("entropy_target", "data_mix", "per_scale_temp")
+    needs_anchor = (args.sampler in ("entropy_target", "data_mix", "per_scale_temp",
+                                     "drift_warm")
                     or (args.sampler == "top_h" and args.top_h_mode == "absolute"))
     if args.anchor_stat == "auto":
-        # data_mix / top_h use the conditional (per-position) anchor; the
-        # entropy_target homeostat defaults to the pooled-marginal warm target.
+        # data_mix / drift_warm / top_h use the conditional (per-position) anchor;
+        # the entropy_target homeostat defaults to the pooled-marginal warm target.
         anchor_stat = ("per_position"
-                       if args.sampler in ("top_h", "data_mix") else "pooled")
+                       if args.sampler in ("top_h", "data_mix", "drift_warm")
+                       else "pooled")
     else:
         anchor_stat = args.anchor_stat
     anchor_array = None
@@ -425,9 +436,9 @@ def main():
             f"--sampler {args.sampler}"
             + (" --top_h_mode absolute" if args.sampler == "top_h" else "")
             + " requires --entropy_anchor_path (per-scale anchor JSON; "
-            "for data_mix use the model-conditional anchor from "
-            "measure_model_entropy.py; for per_scale_temp use the calibration "
-            "temperature schedule from measure_calibration_temp.py).")
+            "for data_mix / drift_warm use the model-conditional H_ref anchor "
+            "from measure_model_entropy.py; for per_scale_temp use the "
+            "calibration temperature schedule from measure_calibration_temp.py).")
 
     # data_mix also needs the per-scale data-prior table (threaded like position_mask).
     data_prior_table = None
@@ -445,7 +456,9 @@ def main():
         top_h_alpha=args.top_h_alpha, top_h_mode=args.top_h_mode,
         typical_tau=args.typical_tau, min_p=args.min_p,
         inverted_edt_strength=args.inverted_edt_strength,
-        mix_gain=args.mix_gain, mix_lam_max=args.mix_lam_max)
+        mix_gain=args.mix_gain, mix_lam_max=args.mix_lam_max,
+        drift_gain=args.drift_gain, drift_tmax=args.drift_tmax,
+        drift_tau_floor=args.drift_tau_floor)
 
     # Two launch modes:
     #  (default) trajectory ensemble: N trajectories share one start frame
@@ -560,6 +573,11 @@ def main():
             parts.append(f"anchor={anchor_stat}")
         elif args.sampler == "per_scale_temp":
             parts.append("calib_schedule")
+        elif args.sampler == "drift_warm":
+            parts.append(f"gain={args.drift_gain}")
+            parts.append(f"tmax={args.drift_tmax}")
+            if args.drift_tau_floor != 1.0:
+                parts.append(f"floor={args.drift_tau_floor}")
         elif args.sampler == "top_h":
             parts.append(f"mode={args.top_h_mode}")
             parts.append(f"alpha={args.top_h_alpha}" if args.top_h_mode == "relative"

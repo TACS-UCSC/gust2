@@ -60,7 +60,7 @@ class SamplerConfig:
     argument to `sample_scale`.
     """
 
-    method: str = "ancestral"          # ancestral|entropy_target|per_scale_temp|top_h|typical|min_p|inverted_edt|data_mix
+    method: str = "ancestral"          # ancestral|entropy_target|per_scale_temp|drift_warm|top_h|typical|min_p|inverted_edt|data_mix
 
     # -- ancestral (legacy temperature / top_k / top_p; back-compat) --
     temperature: float = 0.0           # 0.0 => greedy argmax
@@ -91,6 +91,11 @@ class SamplerConfig:
     mix_gain: float = 1.0              # single global knob: gain on the confidence-deficit gate
     mix_lam_max: float = 1.0           # hard cap on injected fraction (1.0 = parameter-free)
     mix_eps: float = 1e-30
+
+    # -- drift_warm (online horizon-adaptive temperature overshoot) --
+    drift_gain: float = 2.5            # overshoot factor; 1.0 == etmodel (restore to H_ref)
+    drift_tmax: float = 3.0            # hard cap on the applied temperature
+    drift_tau_floor: float = 1.0       # warm-only floor (>=1); raise to 1.1-1.3 for an always-warm floor
 
 
 # =============================================================================
@@ -213,6 +218,50 @@ def _per_scale_temp(logits: jax.Array, key: jax.Array, anchor: jax.Array,
     assert anchor is not None, "per_scale_temp requires an anchor (per-scale temperature T_k)"
     tau = jnp.asarray(anchor, jnp.float32)
     return jax.random.categorical(key, logits / tau, axis=-1).astype(jnp.int32)
+
+
+def _drift_warm(logits: jax.Array, key: jax.Array, anchor: jax.Array,
+                cfg: SamplerConfig) -> jax.Array:
+    """Online horizon-adaptive temperature OVERSHOOT (drift controller).
+
+    Generalizes `entropy_target` by OVERSHOOTING the teacher-forced baseline
+    `H_ref` (the anchor) in proportion to how far the LIVE free-running entropy
+    has collapsed below it. During free-running rollout the model enters a
+    confidence trap: per-step entropy cliffs DOWN below its clean teacher-forced
+    value. The per-scale deficit `relu(H_ref - mean H_live)` is the one signal
+    that is both config-adaptive AND grows with the horizon, so we target
+
+        target = H_ref + (drift_gain - 1) * deficit      (>= H_ref when collapsed)
+
+    and solve the per-position temperature that hits it.
+
+      * `drift_gain == 1`  ->  target == H_ref  ==  the `etmodel` arm (restore to
+        H_ref). H_ref IS the T=1 entropy of the teacher-forced logits, so
+        restoring to it can only give T~=1 -> `etmodel` under-warms by
+        construction. This is the known-failing control.
+      * `drift_gain > 1`   ->  target overshoots H_ref by a per-scale amount ->
+        forces the solved temperature ABOVE 1 (the only way to escape the
+        confidence trap).
+
+    Cold-safe by construction: where the scale is not collapsed (mean H_live >=
+    H_ref) the deficit is 0 -> target = H_ref -> with the warm-only floor the
+    cells sit at T~=1 (matches `etmodel`'s cold-optimal behavior on sc341).
+
+    The deficit is a per-SCALE mean (not per-position): a confident cell inside a
+    healthy scale stays near T=1 (don't over-diffuse correct structure), while a
+    confident cell inside a collapsed scale still warms (the trap). Warm-only and
+    hard-capped: tau in [drift_tau_floor (>=1), drift_tmax].
+    """
+    assert anchor is not None, "drift_warm requires an anchor (per-scale teacher-forced entropy H_ref)"
+    Href = jnp.asarray(anchor, jnp.float32)
+    q = jax.nn.softmax(logits, axis=-1)
+    Hq = _entropy_from_probs(q, axis=-1)                        # (T,) live per-position entropy
+    deficit = jax.nn.relu(Href - jnp.mean(Hq))                 # scalar: per-scale-mean collapse
+    target = Href + (cfg.drift_gain - 1.0) * deficit           # scalar overshot target entropy
+    tau = _solve_temperature(logits, target, cfg)              # (T,) per-position tau to hit target
+    tau = jnp.clip(tau, cfg.drift_tau_floor, cfg.drift_tmax)   # warm-only, capped
+    return jax.random.categorical(
+        key, logits / tau[:, None], axis=-1).astype(jnp.int32)
 
 
 def _top_h_keep(logits: jax.Array, bound: jax.Array) -> jax.Array:
@@ -361,7 +410,8 @@ def sample_scale(logits: jax.Array, key: jax.Array, anchor, cfg: SamplerConfig,
             (invalid entries == -1e9).
         key: PRNGKey, or None only when method=='ancestral' and temperature==0.
         anchor: scalar per-scale target entropy (nats) for entropy_target /
-            top_h-absolute / data_mix (gate target); None otherwise.
+            top_h-absolute / data_mix (gate target) / drift_warm (H_ref
+            baseline); per-scale temperature for per_scale_temp; None otherwise.
         cfg: SamplerConfig (static).
         d_block: (n_tokens_k, effective_vocab) per-scale data prior for
             data_mix (the scale's pooled empirical code distribution, broadcast
@@ -377,6 +427,8 @@ def sample_scale(logits: jax.Array, key: jax.Array, anchor, cfg: SamplerConfig,
         return _entropy_target(logits, key, anchor, cfg)
     if m == "per_scale_temp":
         return _per_scale_temp(logits, key, anchor, cfg)
+    if m == "drift_warm":
+        return _drift_warm(logits, key, anchor, cfg)
     if m == "top_h":
         return _top_h(logits, key, anchor, cfg)
     if m == "typical":
@@ -425,6 +477,7 @@ def _selftest():
         "ancestral_tkp": SamplerConfig(method="ancestral", temperature=1.0, top_k=4, top_p=0.9),
         "entropy_target": SamplerConfig(method="entropy_target"),
         "per_scale_temp": SamplerConfig(method="per_scale_temp"),
+        "drift_warm": SamplerConfig(method="drift_warm"),
         "top_h_rel": SamplerConfig(method="top_h", top_h_mode="relative", top_h_alpha=0.4),
         "top_h_abs": SamplerConfig(method="top_h", top_h_mode="absolute"),
         "top_h_warmcap": SamplerConfig(method="top_h", top_h_mode="absolute", base_temperature=1.5),
@@ -435,7 +488,7 @@ def _selftest():
     for name, cfg in methods.items():
         for s in range(4):
             k = jax.random.fold_in(key0, s)
-            a = anchor if cfg.method in ("entropy_target", "per_scale_temp") or (
+            a = anchor if cfg.method in ("entropy_target", "per_scale_temp", "drift_warm") or (
                 cfg.method == "top_h" and cfg.top_h_mode == "absolute") else None
             pred = sample_scale(logits, k, a, cfg)
             assert_in_support(pred, name)
@@ -461,6 +514,40 @@ def _selftest():
     assert bool(jnp.all(ref_pst == got_pst)), "per_scale_temp != categorical(logits/T)"
     assert_in_support(got_pst, "per_scale_temp")
     print("[ok] per_scale_temp applies fixed T_k (matches categorical reference)")
+
+    # (b3) drift_warm: (i) gain=1 == entropy_target on the warming side;
+    #      (ii) cold-safe (over-diffuse -> T=1); (iii) cap binds at drift_tmax.
+    # (i) build sharp rows whose T=1 entropy is below a reachable H_ref so the
+    #     solve warms (tau in (1, tmax)); gain=1 target == H_ref == etmodel.
+    sharp = jnp.asarray((rng.normal(size=(T, V)) * 1.6).astype(np.float32))
+    Hrows = _entropy_from_probs(jax.nn.softmax(sharp, axis=-1), axis=-1)
+    Href_val = float(min(float(jnp.max(Hrows)) + 0.15, np.log(V) - 0.05))
+    Href_dw = jnp.float32(Href_val)
+    cfg_dw1 = SamplerConfig(method="drift_warm", drift_gain=1.0,
+                            drift_tmax=20.0, drift_tau_floor=1.0)
+    cfg_et = SamplerConfig(method="entropy_target")
+    k = jax.random.fold_in(key0, 555)
+    got_dw = sample_scale(sharp, k, Href_dw, cfg_dw1)
+    ref_et = sample_scale(sharp, k, Href_dw, cfg_et)
+    assert bool(jnp.all(got_dw == ref_et)), "drift_warm gain=1 != entropy_target (warming side)"
+    # (ii) over-diffuse rows (H_live >> H_ref) => deficit 0, solve cools but the
+    #      warm-only floor clamps to T=1.
+    flat = jnp.asarray((rng.normal(size=(T, V)) * 0.1).astype(np.float32))
+    cfg_dw = SamplerConfig(method="drift_warm", drift_gain=2.5,
+                           drift_tmax=3.0, drift_tau_floor=1.0)
+    k = jax.random.fold_in(key0, 556)
+    got_cold = sample_scale(flat, k, jnp.float32(0.5), cfg_dw)
+    ref_t1 = jax.random.categorical(k, flat / 1.0, axis=-1).astype(jnp.int32)
+    assert bool(jnp.all(got_cold == ref_t1)), "drift_warm not cold-safe (over-diffuse should give T=1)"
+    # (iii) fully collapsed rows + high gain => target unreachable => tau caps at drift_tmax.
+    verysharp = jnp.asarray((rng.normal(size=(T, V)) * 6.0).astype(np.float32))
+    cfg_cap = SamplerConfig(method="drift_warm", drift_gain=10.0,
+                            drift_tmax=2.0, drift_tau_floor=1.0)
+    k = jax.random.fold_in(key0, 557)
+    got_cap = sample_scale(verysharp, k, jnp.float32(np.log(V) - 0.01), cfg_cap)
+    ref_cap = jax.random.categorical(k, verysharp / 2.0, axis=-1).astype(jnp.int32)
+    assert bool(jnp.all(got_cap == ref_cap)), "drift_warm cap not binding at drift_tmax"
+    print("[ok] drift_warm: gain=1==etmodel(warm side), cold-safe->T=1, cap binds at tmax")
 
     # (c) entropy_target hits the target within tolerance for in-range targets,
     #     and clamps gracefully out of range. Use smooth (unmasked) logits.
