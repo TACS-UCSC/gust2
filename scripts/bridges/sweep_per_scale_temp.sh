@@ -78,7 +78,7 @@ walltime_calib_for()  { case "$1" in sc341) echo "2:00:00";; sc917) echo "3:00:0
 walltime_static_for() { case "$1" in sc341) echo "1:00:00";; sc917) echo "1:30:00";; sc1941) echo "6:00:00";;  *) echo "1:30:00";; esac; }
 
 # ---------- Parse args ----------
-DRY_RUN=false; LIST_ONLY=false; SIZE="small"; SC="sc1941"; ARMS="calib static"
+DRY_RUN=false; LIST_ONLY=false; SIZE="small"; SC="sc1941"; ARMS="calib static"; LABEL_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -86,6 +86,7 @@ while [[ $# -gt 0 ]]; do
         --list)         LIST_ONLY=true; shift ;;
         --size)         SIZE="$2"; shift 2 ;;
         --vqvae)        SC="$2"; shift 2 ;;
+        --label)        LABEL_OVERRIDE="$2"; shift 2 ;;
         --arms)         ARMS="$2"; shift 2 ;;
         --coarse-warms) COARSE_WARMS="$2"; shift 2 ;;
         --fine-warms)   FINE_WARMS="$2"; shift 2 ;;
@@ -98,6 +99,9 @@ while [[ $# -gt 0 ]]; do
 Usage: $0 [--size <s>] [--vqvae <sc>] [--arms "calib static"] [--coarse-warms "..."] [--fine-warms "..."] [--supp-temps "..."] [--dry-run] [--list]
   --size <s>          VQ size (small|medium|large). Default: small.
   --vqvae <sc>        sc-config (sc341|sc917|sc1941). Default: sc1941.
+  --label <arch>      NSP arch (e.g. s31/s48/s73/s113/s139). Default: the sc-config's
+                      flagship (sc341 s24 / sc917 s74 / sc1941 s139). Use to run the
+                      full column (the calib arm needs that cell's n128 global-T rollouts).
   --arms "..."        Which arms to submit: calib, static, or both. Default: "calib static".
   --coarse-warms "..."  Static coarse-warm temperatures. Default: ${COARSE_WARMS}.
   --fine-warms "..."    Static fine-warm temperatures. Default: ${FINE_WARMS}.
@@ -114,8 +118,8 @@ EOF
     esac
 done
 
-LABEL="$(flagship_label_for ${SC})"
-if [ -z "${LABEL}" ]; then echo "No flagship arch for ${SC}" >&2; exit 1; fi
+LABEL="${LABEL_OVERRIDE:-$(flagship_label_for ${SC})}"
+if [ -z "${LABEL}" ]; then echo "No arch for ${SC} (pass --label)" >&2; exit 1; fi
 
 VQVAE_NAME="${SIZE}-${SC}"
 RUN_NAME="${VQVAE_NAME}-nsp-${LABEL}"
