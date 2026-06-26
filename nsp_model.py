@@ -566,7 +566,8 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
                       position_mask: jax.Array = None,
                       sampler_cfg: SamplerConfig = None,
                       anchor_array: jax.Array = None,
-                      data_prior_table: jax.Array = None):
+                      data_prior_table: jax.Array = None,
+                      percell_anchor: jax.Array = None):
     """Generate a full t1 frame from t0, scale by scale.
 
     Runs one forward pass per trainable scale. Each scale k is predicted
@@ -743,6 +744,11 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
         # already support-masked (scale_masks + optional position_mask). i is a
         # Python int (unrolled loop) so anchor_array[i] is a static slice.
         anchor_i = None if anchor_array is None else anchor_array[i]
+        # per_scale_temp per-cell arm: override the per-scale scalar with this
+        # scale's (n_tokens_k,) slice of the full-frame temperature schedule,
+        # sliced by the SAME boundaries as position_mask above.
+        if percell_anchor is not None:
+            anchor_i = percell_anchor[boundaries[scale_idx]:boundaries[scale_idx + 1]]
         d_block = (None if data_prior_table is None
                    else data_prior_table[boundaries[scale_idx]:
                                          boundaries[scale_idx + 1], :])

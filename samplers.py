@@ -217,7 +217,13 @@ def _per_scale_temp(logits: jax.Array, key: jax.Array, anchor: jax.Array,
     """
     assert anchor is not None, "per_scale_temp requires an anchor (per-scale temperature T_k)"
     tau = jnp.asarray(anchor, jnp.float32)
-    return jax.random.categorical(key, logits / tau, axis=-1).astype(jnp.int32)
+    # Scalar T_k (per-scale arm) broadcasts directly. A per-cell vector tau of
+    # shape (n_tokens_k,) (per-cell arm) needs an explicit trailing axis — the
+    # same broadcast _solve_temperature / _drift_warm use. Support is preserved:
+    # a masked logit is -1e9, and -1e9 / tau (tau > 0) stays << every valid
+    # logit, so the categorical draw can never select an out-of-support token.
+    scaled = logits / tau[:, None] if tau.ndim == 1 else logits / tau
+    return jax.random.categorical(key, scaled, axis=-1).astype(jnp.int32)
 
 
 def _drift_warm(logits: jax.Array, key: jax.Array, anchor: jax.Array,
@@ -411,7 +417,8 @@ def sample_scale(logits: jax.Array, key: jax.Array, anchor, cfg: SamplerConfig,
         key: PRNGKey, or None only when method=='ancestral' and temperature==0.
         anchor: scalar per-scale target entropy (nats) for entropy_target /
             top_h-absolute / data_mix (gate target) / drift_warm (H_ref
-            baseline); per-scale temperature for per_scale_temp; None otherwise.
+            baseline); for per_scale_temp a fixed temperature — scalar (per-scale
+            arm) OR a (n_tokens_k,) per-cell vector (per-cell arm); None otherwise.
         cfg: SamplerConfig (static).
         d_block: (n_tokens_k, effective_vocab) per-scale data prior for
             data_mix (the scale's pooled empirical code distribution, broadcast
@@ -514,6 +521,25 @@ def _selftest():
     assert bool(jnp.all(ref_pst == got_pst)), "per_scale_temp != categorical(logits/T)"
     assert_in_support(got_pst, "per_scale_temp")
     print("[ok] per_scale_temp applies fixed T_k (matches categorical reference)")
+
+    # (b2b) per_scale_temp with a PER-CELL vector tau (per-cell arm): must equal
+    #       categorical(logits / tau[:,None]) and stay in support. Mixed warm/cold
+    #       per row (some tau<1, some tau>1) exercises the broadcast both ways.
+    tau_vec = jnp.asarray(np.linspace(0.6, 2.4, T).astype(np.float32))
+    k = jax.random.fold_in(key0, 654)
+    ref_vec = jax.random.categorical(k, logits / tau_vec[:, None], axis=-1).astype(jnp.int32)
+    got_vec = sample_scale(logits, k, tau_vec, cfg_pst)
+    assert bool(jnp.all(ref_vec == got_vec)), "per_scale_temp vector tau != categorical(logits/tau[:,None])"
+    assert_in_support(got_vec, "per_scale_temp_vec")
+    # jit + vmap over a batch of keys with the per-cell vector anchor closed over.
+    @jax.jit
+    def _batched(keys):
+        return jax.vmap(lambda kk: sample_scale(logits, kk, tau_vec, cfg_pst))(keys)
+    keys = jax.random.split(jax.random.fold_in(key0, 7), 16)
+    out = _batched(keys)
+    for r in range(out.shape[0]):
+        assert_in_support(out[r], "per_scale_temp_vec_vmap")
+    print("[ok] per_scale_temp vector tau (per-cell) matches reference, in-support under jit+vmap")
 
     # (b3) drift_warm: (i) gain=1 == entropy_target on the warming side;
     #      (ii) cold-safe (over-diffuse -> T=1); (iii) cap binds at drift_tmax.

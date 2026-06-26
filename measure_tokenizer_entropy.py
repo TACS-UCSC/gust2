@@ -37,13 +37,21 @@ def _entropy_nats(probs: np.ndarray) -> float:
     return float(-(p * np.log(p)).sum())
 
 
-def per_scale_entropies(indices_flat: np.ndarray, scales: np.ndarray, V: int):
+def per_scale_entropies(indices_flat: np.ndarray, scales: np.ndarray, V: int,
+                        bias_correct: bool = False):
     """Per-scale pooled-marginal and mean-per-position code entropy (nats).
 
     Args:
         indices_flat: (N, tokens_per_frame) int compact code indices.
         scales: (n_scales,) int side lengths (square scales).
         V: effective vocab size.
+        bias_correct: if True, add the Miller-Madow correction (K_obs-1)/(2M)
+            to every plug-in entropy (pooled and per-cell). Plug-in entropy is
+            negatively biased at large support / finite samples; the correction
+            is first-order. MUST be applied identically to BOTH the data target
+            and the rollout marginal so the differential cancels (the data side
+            uses M~n_frames per cell, the rollout side M~n_frames*n_steps).
+            Default False keeps the historical anchor values unchanged.
 
     Returns:
         dict {scale_value(int) -> {...}}, list boundaries.
@@ -59,7 +67,9 @@ def per_scale_entropies(indices_flat: np.ndarray, scales: np.ndarray, V: int):
 
         # (a) pooled-marginal: one histogram over all positions+frames.
         pooled_hist = np.bincount(block.ravel(), minlength=V).astype(np.float64)
-        pooled = _entropy_nats(pooled_hist / pooled_hist.sum())
+        M_pooled = float(pooled_hist.sum())
+        K_pooled = int((pooled_hist > 0).sum())
+        pooled = _entropy_nats(pooled_hist / M_pooled)
 
         # (b) mean-per-position: per-column histogram via a single combined
         #     bincount (position * V + code), reshaped to (Npos, V).
@@ -74,6 +84,13 @@ def per_scale_entropies(indices_flat: np.ndarray, scales: np.ndarray, V: int):
             xlogx = np.where(per_pos_probs > 0,
                              per_pos_probs * np.log(per_pos_probs), 0.0)
         per_pos_ent = -xlogx.sum(axis=1)                   # (Npos,)
+
+        # Miller-Madow: add (K_obs - 1)/(2M) to each plug-in estimate.
+        if bias_correct:
+            K_per_pos = (per_pos_counts > 0).sum(axis=1)            # (Npos,)
+            M_per_pos = np.maximum(totals[:, 0], 1.0)               # (Npos,)
+            per_pos_ent = per_pos_ent + (K_per_pos - 1) / (2.0 * M_per_pos)
+            pooled = pooled + (K_pooled - 1) / (2.0 * max(M_pooled, 1.0))
         mean_pp = float(per_pos_ent.mean())
 
         out[s] = {
@@ -81,13 +98,17 @@ def per_scale_entropies(indices_flat: np.ndarray, scales: np.ndarray, V: int):
             "mean_per_position_nats": mean_pp,
             "per_position_min_nats": float(per_pos_ent.min()),
             "per_position_max_nats": float(per_pos_ent.max()),
+            # FULL per-cell entropy array (scale-cell order, length Npos = s*s).
+            # The per-position calibration TARGET: solve_calib_schedule matches
+            # the rollout's per-cell emitted-token marginal entropy to this.
+            "per_position_entropies": per_pos_ent.tolist(),
             "n_positions": int(Npos),
             "n_unique_codes_pooled": int((pooled_hist > 0).sum()),
         }
     return out, boundaries
 
 
-def build_anchor(tokens_path: str) -> dict:
+def build_anchor(tokens_path: str, bias_correct: bool = False) -> dict:
     d = np.load(tokens_path, allow_pickle=True)
     indices_flat = np.asarray(d["indices_flat"])
     scales = [int(s) for s in np.asarray(d["scales"]).ravel()]
@@ -98,7 +119,7 @@ def build_anchor(tokens_path: str) -> dict:
     else:
         support = [None] * len(scales)
 
-    per_scale, _ = per_scale_entropies(indices_flat, scales, V)
+    per_scale, _ = per_scale_entropies(indices_flat, scales, V, bias_correct=bias_correct)
     for k, s in enumerate(scales):
         per_scale[s]["support_size"] = support[k]
 
@@ -114,6 +135,7 @@ def build_anchor(tokens_path: str) -> dict:
         "scales": scales,
         "first_trainable_scale": first_trainable,
         "trainable_scale_indices": trainable_idx,
+        "bias_correct": bool(bias_correct),
         # per_scale keyed by scale VALUE (string in JSON)
         "per_scale": {str(s): per_scale[s] for s in scales},
         # pre-packed in trainable order -> aligns 1:1 with enumerate(trainable_indices)
@@ -137,6 +159,11 @@ def _selftest():
     assert abs(per_scale[1]["pooled_marginal_nats"] - 0.0) < 1e-9, per_scale[1]
     assert abs(per_scale[2]["pooled_marginal_nats"] - np.log(2)) < 1e-2, per_scale[2]
     assert abs(per_scale[2]["mean_per_position_nats"] - np.log(2)) < 1e-2, per_scale[2]
+    # full per-cell array: length s*s, and its mean reproduces mean_per_position.
+    pce = per_scale[2]["per_position_entropies"]
+    assert len(pce) == 4, len(pce)                         # scale 2 -> 2*2 = 4 cells
+    assert abs(float(np.mean(pce)) - per_scale[2]["mean_per_position_nats"]) < 1e-9
+    assert abs(len(per_scale[1]["per_position_entropies"]) - 1) == 0   # scale 1 -> 1 cell
     # per_trainable arrays length == len(trainable indices)
     np.savez("/tmp/_t2_self.npz", indices_flat=idx.astype(np.int32),
              scales=scales, effective_vocab_size=V, first_trainable_scale=1,
@@ -186,6 +213,12 @@ def main():
     ap.add_argument("--data_prior_out", type=str, default=None,
                     help="If set, also write the per-scale data-prior table "
                          "(.npz) consumed by the data_mix sampler.")
+    ap.add_argument("--bias_correct", choices=["none", "miller_madow"],
+                    default="none",
+                    help="Entropy estimator bias correction for the per-scale / "
+                         "per-cell marginals. Use the SAME setting here and in "
+                         "measure_rollout_marginal.py so the data-vs-rollout "
+                         "differential cancels (matters only for the per-cell arm).")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
@@ -207,7 +240,8 @@ def main():
     if not args.output:
         return
 
-    anchor = build_anchor(args.tokens_path)
+    anchor = build_anchor(args.tokens_path,
+                          bias_correct=(args.bias_correct == "miller_madow"))
     with open(args.output, "w") as f:
         json.dump(anchor, f, indent=2)
 

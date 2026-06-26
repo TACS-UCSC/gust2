@@ -169,6 +169,14 @@ def parse_args():
                              "--sampler entropy_target and for --sampler top_h "
                              "--top_h_mode absolute. Must come from the same "
                              "VQ-VAE/sc-config as the checkpoint.")
+    parser.add_argument("--percell_anchor_path", type=str, default=None,
+                        help="PER-CELL temperature schedule JSON from "
+                             "solve_calib_schedule.py (--out_per_cell). Only with "
+                             "--sampler per_scale_temp; the per-cell arm of the "
+                             "horizon-marginal calibration (one fixed T per "
+                             "spatial position). Mutually exclusive with "
+                             "--entropy_anchor_path. Must match the checkpoint's "
+                             "VQ-VAE/sc-config (length tokens_per_frame).")
     parser.add_argument("--anchor_stat", type=str, default="auto",
                         choices=["auto", "pooled", "per_position"],
                         help="Which T2 statistic anchors the sampler. 'auto' = "
@@ -240,6 +248,34 @@ def load_data_prior(path, token_data):
         raise SystemExit(
             f"data_prior shape {table.shape} != expected ({P}, {V_val}) ({path}).")
     return jnp.asarray(table, dtype=jnp.float32)
+
+
+def load_percell_anchor(path, token_data):
+    """Load the per-cell temperature schedule -> (tokens_per_frame,) jnp float32.
+
+    The per-cell arm of the horizon-marginal calibration: one fixed temperature
+    per spatial position, solved by solve_calib_schedule.py. Threaded into
+    generate_t1_frame and sliced per scale exactly like position_mask. Guards the
+    same VQ-VAE/sc-config as the val tokens (length + scales) so a layout mismatch
+    cannot silently mis-temperature whole scales.
+    """
+    with open(path) as f:
+        a = json.load(f)
+    tau = np.asarray(a["percell_temperature"], dtype=np.float32)
+    scales_val = [int(s) for s in token_data["scales"]]
+    P = int(sum(s * s for s in scales_val))
+    file_scales = [int(s) for s in a.get("scales", [])]
+    if file_scales != scales_val:
+        raise SystemExit(
+            f"percell anchor scales {file_scales} != val tokens {scales_val} "
+            f"({path}); build it from the same VQ-VAE/sc-config as --tokens_path.")
+    if tau.shape != (P,):
+        raise SystemExit(
+            f"percell_temperature length {tau.shape} != tokens_per_frame ({P,}) "
+            f"({path}).")
+    if not np.all(tau > 0):
+        raise SystemExit(f"percell_temperature must be > 0 everywhere ({path}).")
+    return jnp.asarray(tau, dtype=jnp.float32)
 
 
 def compute_token_accuracy(pred_tokens, gt_tokens, config):
@@ -427,18 +463,33 @@ def main():
                        else "pooled")
     else:
         anchor_stat = args.anchor_stat
+    # per_scale_temp accepts EITHER a per-scale anchor (--entropy_anchor_path,
+    # the per-scale arm) OR a per-cell schedule (--percell_anchor_path, the
+    # per-cell arm), but not both.
+    if (args.percell_anchor_path is not None
+            and args.entropy_anchor_path is not None):
+        raise SystemExit(
+            "--percell_anchor_path and --entropy_anchor_path are mutually "
+            "exclusive (per-cell arm vs per-scale arm of per_scale_temp).")
+    if args.percell_anchor_path is not None and args.sampler != "per_scale_temp":
+        raise SystemExit(
+            "--percell_anchor_path is only valid with --sampler per_scale_temp.")
     anchor_array = None
     if args.entropy_anchor_path is not None:
         anchor_array = load_anchor_array(
             args.entropy_anchor_path, trainable_indices, anchor_stat)
-    if needs_anchor and anchor_array is None:
+    percell_anchor = None
+    if args.percell_anchor_path is not None:
+        percell_anchor = load_percell_anchor(args.percell_anchor_path, token_data)
+    if needs_anchor and anchor_array is None and percell_anchor is None:
         raise SystemExit(
             f"--sampler {args.sampler}"
             + (" --top_h_mode absolute" if args.sampler == "top_h" else "")
             + " requires --entropy_anchor_path (per-scale anchor JSON; "
             "for data_mix / drift_warm use the model-conditional H_ref anchor "
-            "from measure_model_entropy.py; for per_scale_temp use the "
-            "calibration temperature schedule from measure_calibration_temp.py).")
+            "from measure_model_entropy.py; for per_scale_temp use the per-scale "
+            "calibration schedule from solve_calib_schedule.py --out_per_scale, "
+            "or --percell_anchor_path for the per-cell schedule).")
 
     # data_mix also needs the per-scale data-prior table (threaded like position_mask).
     data_prior_table = None
@@ -537,6 +588,7 @@ def main():
             sampler_cfg=sampler_cfg,
             anchor_array=anchor_array,
             data_prior_table=data_prior_table,
+            percell_anchor=percell_anchor,
         )
 
     @jax.jit
@@ -572,6 +624,7 @@ def main():
         if args.sampler == "entropy_target":
             parts.append(f"anchor={anchor_stat}")
         elif args.sampler == "per_scale_temp":
+            parts.append("percell" if percell_anchor is not None else "per_scale")
             parts.append("calib_schedule")
         elif args.sampler == "drift_warm":
             parts.append(f"gain={args.drift_gain}")
@@ -761,6 +814,7 @@ def main():
         "mix_lam_max": args.mix_lam_max,
         "data_prior_path": args.data_prior_path,
         "entropy_anchor_path": args.entropy_anchor_path,
+        "percell_anchor_path": args.percell_anchor_path,
         "anchor_stat": anchor_stat,
         "anchor_array": (anchor_array.tolist() if anchor_array is not None else None),
         "checkpoint_dir": args.checkpoint_dir,
