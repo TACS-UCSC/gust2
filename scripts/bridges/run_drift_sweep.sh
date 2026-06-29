@@ -17,7 +17,7 @@ WANDB_BASE="${OCEAN}/wandb"
 ACCOUNT="mth260004p"
 LOG_DIR="${TEMPOPT_BASE}/logs"
 SIZES="${SIZES:-small medium large}"
-WALLTIME="${WALLTIME:-2:00:00}"          # pure-numpy I/O sweep over ~75 npz/size
+WALLTIME="${WALLTIME:-3:00:00}"          # pure-numpy I/O sweep over ~74 npz/size
 mkdir -p "${LOG_DIR}"
 
 if [[ "${1:-}" == "--list" ]]; then
@@ -31,11 +31,15 @@ fi
 for SIZE in ${SIZES}; do
     sbatch <<EOF
 #!/usr/bin/env bash
+# CPU-only (pure numpy) job, but mth260004p only has a GPU QOS, so it must run on
+# GPU-shared (1 GPU min; left idle). Switch -p/--gres to RM-shared if you have a
+# CPU allocation. The metric never touches the GPU.
 #SBATCH -J drift-${SIZE}
 #SBATCH -A ${ACCOUNT}
-#SBATCH -p RM-shared
+#SBATCH -p GPU-shared
 #SBATCH -N 1
-#SBATCH --ntasks-per-node 4
+#SBATCH --gres=gpu:h100-80:1
+#SBATCH --exclude=w009
 #SBATCH -t ${WALLTIME}
 #SBATCH -o ${LOG_DIR}/drift-${SIZE}-%j.out
 #SBATCH -e ${LOG_DIR}/drift-${SIZE}-%j.err
