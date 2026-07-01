@@ -94,6 +94,19 @@ def parse_args():
                              "is unchanged (true t1), so this is a "
                              "denoising objective that exposes the model "
                              "to its own rollout-time error distribution.")
+    parser.add_argument("--loss_mask", type=str, default="auto",
+                        choices=["auto", "none", "per_scale", "per_token"],
+                        help="Support mask applied to the logits in the CE "
+                             "loss. 'per_token' uses the per-position mask "
+                             "built from --train_tokens_path; 'per_scale' "
+                             "uses the tokenizer scale_masks; 'none' leaves "
+                             "logits unmasked (E2 mask-ablation arm). "
+                             "'auto' (default) preserves historical "
+                             "behavior: per_token when --train_tokens_path "
+                             "is given, else per_scale. Independent of "
+                             "--substitution_rate, whose legal pool always "
+                             "comes from --train_tokens_path, so ablation "
+                             "arms share identical substitution noise.")
     # Checkpointing
     parser.add_argument("--checkpoint_dir", type=str, default="./checkpoints_nsp")
     parser.add_argument("--save_every", type=int, default=10,
@@ -169,14 +182,16 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
                       position_mask=None,
                       legal_indices=None,
                       per_pos_count=None,
-                      substitution_rate=0.0):
+                      substitution_rate=0.0,
+                      loss_mask_mode="per_scale"):
     """Build the loss function capturing static config.
 
-    When position_mask is provided, the per-scale logit mask is replaced
-    by a per-position mask of shape (tokens_per_frame, effective_vocab),
-    sliced per scale inside the loop. This calibrates training under the
+    loss_mask_mode selects the support mask applied to the logits:
+    'per_token' slices a (tokens_per_frame, effective_vocab) per-position
+    mask per scale inside the loop — this calibrates training under the
     same constraint enforced at rollout (rollout_nsp.py + per-position
-    masking).
+    masking). 'per_scale' uses the tokenizer scale_masks. 'none' leaves
+    the logits unmasked (mask-ablation arm).
 
     When substitution_rate > 0 and legal_indices/per_pos_count are
     provided, each input token is independently replaced (with that
@@ -205,7 +220,11 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
     # Total tokens in truncated t1
     tokens_t1_trunc = sum(h * w for h, w in scales_t1)
 
-    use_pos_mask = position_mask is not None
+    if loss_mask_mode not in ("none", "per_scale", "per_token"):
+        raise ValueError(f"Unresolved loss_mask_mode: {loss_mask_mode!r}")
+    if loss_mask_mode == "per_token" and position_mask is None:
+        raise ValueError(
+            "loss_mask_mode='per_token' requires a position_mask.")
     use_substitution = (substitution_rate > 0.0
                         and legal_indices is not None
                         and per_pos_count is not None)
@@ -354,15 +373,15 @@ def make_compute_loss(config, scales_t0, padded_len_t0,
             )(h_flat)
             # (B, n_tokens_k, effective_vocab)
 
-            # Mask invalid tokens to -1e9. When position_mask is
-            # available, slice it per scale and use it directly (it is
-            # a strict subset of scale_masks so AND-ing is unnecessary).
+            # Mask invalid tokens to -1e9 per loss_mask_mode. The
+            # per-token mask is a strict subset of scale_masks so
+            # AND-ing is unnecessary; 'none' leaves logits unmasked.
             tgt_start = boundaries_full[scale_idx]
             tgt_end = boundaries_full[scale_idx + 1]
-            if use_pos_mask:
+            if loss_mask_mode == "per_token":
                 pm_slice = position_mask[tgt_start:tgt_end, :]
                 logits = jnp.where(pm_slice[None, :, :], logits, -1e9)
-            else:
+            elif loss_mask_mode == "per_scale":
                 mask_k = scale_masks[scale_idx]  # (effective_vocab,) bool
                 logits = jnp.where(mask_k[None, None, :], logits, -1e9)
 
@@ -500,10 +519,11 @@ def main():
 
     # Optional: build per-position vocabulary mask + uniform-substitution
     # legal-token table from a training tokens npz. When provided, this
-    # both (a) replaces the per-scale mask in the loss and (b) supplies
-    # the legal pool for --substitution_rate noise. The npz must come
-    # from the same VQ-VAE as --tokens_path (matching effective_vocab and
-    # new_to_old).
+    # (a) supplies the per-token loss mask (used iff --loss_mask resolves
+    # to per_token) and (b) supplies the legal pool for
+    # --substitution_rate noise (always, regardless of --loss_mask). The
+    # npz must come from the same VQ-VAE as --tokens_path (matching
+    # effective_vocab and new_to_old).
     position_mask_jnp = None
     legal_indices_jnp = None
     per_pos_count_jnp = None
@@ -565,6 +585,19 @@ def main():
             "--substitution_rate > 0 requires --train_tokens_path "
             "(needed to build the per-position legal-token pool).")
 
+    # Resolve the loss support-mask mode. 'auto' preserves historical
+    # behavior (per_token iff --train_tokens_path was given); explicit
+    # 'none'/'per_scale' allow the mask-ablation arms to keep the
+    # substitution pool while changing only the loss mask.
+    loss_mask_mode = args.loss_mask
+    if loss_mask_mode == "auto":
+        loss_mask_mode = ("per_token" if args.train_tokens_path is not None
+                          else "per_scale")
+    if loss_mask_mode == "per_token" and position_mask_jnp is None:
+        raise SystemExit(
+            "--loss_mask per_token requires --train_tokens_path.")
+    print(f"Loss support mask: {loss_mask_mode}")
+
     # Setup config
     config = NSPConfig(
         n_layer=args.n_layer,
@@ -594,6 +627,9 @@ def main():
         "first_trainable_scale": config.first_trainable_scale,
         "rope_theta": config.rope_theta,
         "n_refine_layers": config.n_refine_layers,
+        # Training-recipe provenance (resume validation tolerates its
+        # absence in pre-loss_mask checkpoints via saved_arch.get()).
+        "loss_mask": loss_mask_mode,
     }
 
     # Compute sequence lengths
@@ -639,6 +675,7 @@ def main():
         legal_indices=legal_indices_jnp,
         per_pos_count=per_pos_count_jnp,
         substitution_rate=args.substitution_rate,
+        loss_mask_mode=loss_mask_mode,
     )
     train_step = make_train_step(compute_loss_fn)
 

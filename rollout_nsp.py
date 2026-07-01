@@ -127,6 +127,18 @@ def parse_args():
                              "(same effective_vocab_size and new_to_old "
                              "mapping) as --tokens_path. None disables "
                              "(default; only per-scale masking applies).")
+    parser.add_argument("--emission_mask", type=str, default="auto",
+                        choices=["auto", "none", "per_scale", "per_token"],
+                        help="Support mask applied to logits at every "
+                             "emission. 'per_token' requires "
+                             "--train_tokens_path; 'per_scale' applies "
+                             "only the tokenizer scale_masks; 'none' "
+                             "disables support masking entirely "
+                             "(mask-ablation arm; expect positional-OOD "
+                             "explosions). 'auto' (default) preserves "
+                             "historical behavior: per_token when "
+                             "--train_tokens_path is given, else "
+                             "per_scale.")
     # --- Inference samplers (samplers.py). Default 'ancestral' == the legacy
     #     temperature/top_k/top_p path, reproduced bit-for-bit. ---
     parser.add_argument("--sampler", type=str, default="ancestral",
@@ -360,11 +372,30 @@ def main():
     scale_masks = jnp.array(token_data["scale_masks"])
     print(f"  {len(indices)} frames, {sum(s*s for s in scales_int)} tokens/frame")
 
+    # Resolve the emission support-mask mode. 'auto' preserves historical
+    # behavior (per_token iff --train_tokens_path was given).
+    emission_mask_mode = args.emission_mask
+    if emission_mask_mode == "auto":
+        emission_mask_mode = ("per_token"
+                              if args.train_tokens_path is not None
+                              else "per_scale")
+    if emission_mask_mode == "per_token" and args.train_tokens_path is None:
+        raise SystemExit(
+            "--emission_mask per_token requires --train_tokens_path.")
+    print(f"Emission support mask: {emission_mask_mode}")
+    if emission_mask_mode == "none":
+        # generate_t1_frame applies scale_masks unconditionally; pass an
+        # all-True mask so emissions are unrestricted within the compact
+        # vocab. (The real masks are still saved to the output npz from
+        # token_data for downstream analysis.)
+        scale_masks = jnp.ones_like(scale_masks)
+
     # Optional: build per-position vocabulary mask from training tokens.
     # The mask must come from the same VQ-VAE as the val tokens above.
+    # Only built when the resolved emission mode actually uses it.
     position_mask_np = None
     position_mask = None
-    if args.train_tokens_path is not None:
+    if emission_mask_mode == "per_token":
         print(f"Loading training tokens for per-position mask: "
               f"{args.train_tokens_path}")
         train_npz = np.load(args.train_tokens_path)
@@ -656,8 +687,10 @@ def main():
         if top_p < 1.0:
             parts.append(f"top_p={top_p}")
         decode_desc = ",".join(parts)
-    if position_mask is not None:
+    if emission_mask_mode == "per_token":
         decode_desc += ",pos_mask"
+    elif emission_mask_mode == "none":
+        decode_desc += ",NO_MASK"
     if forecast_mode:
         print(f"\nForecast rollout: {args.n_steps} steps x {N} ICs "
               f"(spread {int(start_frames[0])}..{int(start_frames[-1])}, "
@@ -771,6 +804,7 @@ def main():
         "new_to_old": token_data["new_to_old"],
         "scale_masks": np.array(token_data["scale_masks"]),
         "position_mask_used": bool(position_mask_np is not None),
+        "emission_mask": emission_mask_mode,
     }
     if position_mask_np is not None:
         save_dict["train_tokens_path"] = str(args.train_tokens_path)
@@ -803,6 +837,7 @@ def main():
         "start_frame": int(start_frames[0]),
         "log_topk": log_topk,
         "position_mask_used": bool(position_mask_np is not None),
+        "emission_mask": emission_mask_mode,
         "sampler": args.sampler,
         "base_temperature": args.base_temperature,
         "top_h_alpha": args.top_h_alpha,

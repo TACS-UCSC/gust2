@@ -28,11 +28,14 @@ specs) and `paper/OUTLINE.md` (claim spine). Keep this the single source of trut
 
 ## A. Baselines  (your list + the controls it's missing)
 
-- [ ] **B3 — Flat / raster-style tokenizer (no scale reconstruction)** 🔴(config-only, cheapest of the trio)
+- [~] **B3 — Flat / raster-style tokenizer (no scale reconstruction)** 🔴(config-only, cheapest of the trio)
   *Tag: disc-vs-cont gate.* Single-scale EMA-VQ at scales (16,)/(24,)/(32,) = degenerate `MultiScaleVQ`
-  via existing `train.py`; best codebook config fixed. **GATE — run FIRST:** if flat-1024's recon floor ≈
+  via existing `train.py`; codebook hyperparams **family-matched** (beta 0.1 / EMA 0.85 — see
+  BASELINES_SPEC B3, decision 2026-07-01). **GATE — run FIRST:** if flat-1024's recon floor ≈
   sc917's, the residual-pyramid / skip-quant argument collapses, so we must know before writing §6.
   Eval: val recon spectra, high-k RSE, EMD. *(= BASELINES_SPEC B3.)*
+  **Launcher ready 2026-07-01:** `scripts/bridges/baselines/train_flat_vq.sh` (3 × 1-GPU jobs).
+  After training: tokenize + recon-floor eval still to wire.
 
 - [ ] **B1 — Non-quantized continuous *latent* (vanilla ViT, t0→t1)** 🔴
   *Tag: disc-vs-cont (the clean isolation).* Reuse the frozen VQ-VAE enc/dec, bypass the quantizer, regress
@@ -93,15 +96,24 @@ specs) and `paper/OUTLINE.md` (claim spine). Keep this the single source of trut
   suppresses both). **Outcome largely known** already from the TKE-RSE-vs-time-horizon scaling — this is producing
   the figure, not discovering the result. *(audit P0-1.)*
 
-- [ ] **E2 — Clean mask ablation on ONE sc917 model** 🟡 *(the key experiment to add)*
+- [~] **E2 — Clean mask ablation on ONE sc917 model** 🟡 *(the key experiment to add)*
   *Tag: mask (headline) + two-modes.* 3-way support mask {none / per-scale / per-token} × sampling {warm-optimal,
   greedy/cold}, single fixed sc917 cell, n_traj≥8, OOD-rate trace overlaid. **The greedy/cold arm folds in the
   old E6:** the per-token mask ALONE under greedy still diffusive-collapses → mask⊥temperature, both independently
   necessary. Replaces the scattered heterogeneous April runs the headline rests on. *(audit P0-2 + corrected two-modes claim.)*
+  **Tooling ready 2026-07-01:** cell = **small-sc917-s34** (D/P anchor); `--loss_mask` (train_nsp.py) +
+  `--emission_mask` (rollout_nsp.py) landed, CPU-smoke-tested (no-mask arm provably unmasked: CE starts at
+  ln V at every scale; 6.3% off-support emissions from an untrained model; `auto` = old behavior, 0 violations).
+  Launcher: `scripts/bridges/sweep_mask_ablation.sh` (2 trainings + 6 afterok rollout/analysis jobs,
+  arms × T∈{0.7, 1.6}, N=16, 2000 steps; per-token arm reuses the ar-robust-scaling checkpoint).
+  OOD-rate traces = offline replot from rollout_tokens.npz (token-space, no GPU).
 
 - [x] **E3 — Multi-seed swept-temperature Pareto** ✅ DONE via the canonical **N=128** scaling-tempopt sweep
   (n_traj=128/cell → per-cell best-T optima in hand). *Tag: two-modes / less-intervention; this is I1's yardstick.*
   Optional cleanup before final figures: close the ~6-job warm-sc917 coverage gap; sc341-hot (>1.6) still un-swept. *(audit P0-3.)*
+  **Gap-run tooling ready 2026-07-01 (R3):** `sweep_scaling_tempopt_n128.sh --temps "..." --no-survival`
+  (per-temp skip logic makes re-runs compute only the new temps). Plan: sc341 all 15 cells ×
+  T{1.4 1.8 2.2 2.6 3.0} (hot wall + the 1.2→1.8 hole); medium/large-sc917-s50 × T2.0.
 
 - [x] **E6 — Mask-alone-under-greedy** → **folded into E2** (the greedy/cold arm of the sc917 mask ablation).
 

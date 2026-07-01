@@ -59,10 +59,13 @@ flipped is quantize-or-don't.
 ## B3 — Flat-VQ tokenizers (raster bound, budget-fidelity Pareto)
 
 - Three single-scale tokenizers via existing `train.py`: `scales=(16,)`, `(24,)`,
-  `(32,)` — degenerate cases of MultiScaleVQ, config-only runs. Small arch (D=5), best
-  codebook config (4096 / 512 / beta 0.25 / EMA 0.90) held fixed. EMA-VQ, NOT FSQ
-  (isolates the residual-pyramid axis; FSQ would change two variables at once —
-  PhysiX handled in related work).
+  `(32,)` — degenerate cases of MultiScaleVQ, config-only runs. Small arch (D=5),
+  codebook 4096 / 512 with **beta 0.1 / EMA 0.85** (decision 2026-07-01: match what
+  the trained small-sc* family *actually* used in `sweep_scales.sh`, not the sweep's
+  "best config" 0.25/0.90 — the Pareto's isolation requires the scale structure to be
+  the only changed variable). EMA-VQ, NOT FSQ (isolates the residual-pyramid axis;
+  FSQ would change two variables at once — PhysiX handled in related work).
+  Launcher: `scripts/bridges/baselines/train_flat_vq.sh`.
 - Names follow token-count convention: `small-flat-sc256`, `small-flat-sc576`,
   `small-flat-sc1024` under `experiments/vqvae/`.
 - Eval: val-set reconstruction spectra, high-k RSE, EMD. Figure: tokens/frame vs floor

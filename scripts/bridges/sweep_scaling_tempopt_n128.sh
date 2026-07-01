@@ -28,6 +28,19 @@
 #   ./scripts/bridges/sweep_scaling_tempopt_n128.sh --vqvae sc1941 --label s73
 #   ./scripts/bridges/sweep_scaling_tempopt_n128.sh --dry-run
 #   ./scripts/bridges/sweep_scaling_tempopt_n128.sh --list
+#
+# Gap-run overrides (R3, paper/OUTLINE.md):
+#   --temps "1.4 1.8 2.2 2.6 3.0"   Override the per-config temperature
+#                                   bracket for all matched cells. Per-temp
+#                                   metrics.json/rollout skips make this
+#                                   safely re-runnable on cells that already
+#                                   have the base bracket — only the new
+#                                   temps compute.
+#   --no-survival                   Skip the per-cell survival job (it is a
+#                                   collapse-time diagnostic, not needed for
+#                                   the F6.1 phase-diagram verdicts; existing
+#                                   survival_data.npz would skip-but-stale
+#                                   over new temps anyway).
 
 set -euo pipefail
 
@@ -138,6 +151,8 @@ FILTER_SIZE=""
 FILTER_VQVAE=""
 FILTER_LABEL=""
 LIST_ONLY=false
+TEMPS_OVERRIDE=""
+NO_SURVIVAL=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -145,13 +160,21 @@ while [[ $# -gt 0 ]]; do
         --size) FILTER_SIZE="$2"; shift 2 ;;
         --vqvae) FILTER_VQVAE="$2"; shift 2 ;;
         --label) FILTER_LABEL="$2"; shift 2 ;;
+        --temps) TEMPS_OVERRIDE="$2"; shift 2 ;;
+        --no-survival) NO_SURVIVAL=true; shift ;;
         --list) LIST_ONLY=true; shift ;;
         --help|-h)
             cat <<EOF
-Usage: $0 [--size <s>] [--vqvae <substr>] [--label <substr>] [--dry-run] [--list]
+Usage: $0 [--size <s>] [--vqvae <substr>] [--label <substr>] \\
+          [--temps "<t1> <t2> ..."] [--no-survival] [--dry-run] [--list]
   --size <s>         Only this VQ size (small|medium|large). Default: all three.
   --vqvae <substr>   Filter by sc-config substring (e.g. sc1941).
   --label <substr>   Filter by NSP arch label (e.g. s73).
+  --temps "<list>"   Override the per-config temperature bracket (space-
+                     separated) for all matched cells. Already-analyzed
+                     temps skip via metrics.json, so re-runs only compute
+                     the new temps.
+  --no-survival      Do not submit the per-cell survival job.
   --dry-run          Print actions without submitting.
   --list             Print the grid + temperature brackets and exit.
 EOF
@@ -197,6 +220,12 @@ echo "Canonical long-term scaling sweep (N=${N_TRAJ})"
 echo "  Sizes:         ${SIZES[*]}"
 echo "  posmask:       ON   N_traj: ${N_TRAJ}   steps: ${N_STEPS}   + survival"
 echo "  Fan-out:       1 job per (cell, temp); 1 survival/cell (afterok)"
+if [ -n "${TEMPS_OVERRIDE}" ]; then
+    echo "  Temps:         OVERRIDE [${TEMPS_OVERRIDE}]"
+fi
+if [ "${NO_SURVIVAL}" = true ]; then
+    echo "  Survival:      SKIPPED (--no-survival)"
+fi
 echo "  Output base:   ${TEMPOPT_BASE}"
 echo "  Wandb:         ${WANDB_PROJECT_PREFIX}-{small,medium,large}"
 echo "  Dry run:       ${DRY_RUN}"
@@ -227,7 +256,7 @@ for SIZE in "${SIZES[@]}"; do
         LOG_DIR="${TEMPOPT_BASE}/logs"
         WANDB_PROJECT="${WANDB_PROJECT_PREFIX}-${SIZE}"
         WANDB_GROUP="${SC}"
-        TEMPS="$(temps_for ${SC})"
+        TEMPS="${TEMPS_OVERRIDE:-$(temps_for ${SC})}"
         WALLTIME="$(walltime_for ${SC})"
         SURV_WALLTIME="$(survival_walltime_for ${SC})"
         IC_CHUNK="$(ic_chunk_for ${SC})"
@@ -338,7 +367,10 @@ SBATCH_EOF
             rm -f "${TMPFILE}"
         done
 
-        # ---- One survival job per cell, gated on its 5 temp jobs (afterok) ----
+        # ---- One survival job per cell, gated on its temp jobs (afterok) ----
+        if [ "${NO_SURVIVAL}" = true ]; then
+            continue
+        fi
         DEP_STR="$(IFS=:; echo "${TEMP_JOBIDS[*]}")"
         SURV_OUT="${CELL_DIR}/survival"
 
