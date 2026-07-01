@@ -1,0 +1,104 @@
+{
+  "tokens_path": "codebook_artifacts/tokens/large-sc1941.npz",
+  "n_frames": 30000,
+  "effective_vocab_size": 2207,
+  "scales": [
+    1,
+    2,
+    4,
+    8,
+    16,
+    24,
+    32
+  ],
+  "first_trainable_scale": 1,
+  "trainable_scale_indices": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "per_scale": {
+    "1": {
+      "pooled_marginal_nats": -0.0,
+      "mean_per_position_nats": 0.0,
+      "per_position_min_nats": -0.0,
+      "per_position_max_nats": -0.0,
+      "n_positions": 1,
+      "n_unique_codes_pooled": 1,
+      "support_size": 1
+    },
+    "2": {
+      "pooled_marginal_nats": 0.8004642393474792,
+      "mean_per_position_nats": 0.7953870122893665,
+      "per_position_min_nats": 0.7905733271712132,
+      "per_position_max_nats": 0.8033253146986071,
+      "n_positions": 4,
+      "n_unique_codes_pooled": 10,
+      "support_size": 10
+    },
+    "4": {
+      "pooled_marginal_nats": 2.394035290816505,
+      "mean_per_position_nats": 2.3579839326067993,
+      "per_position_min_nats": 2.257199254497429,
+      "per_position_max_nats": 2.523664434398307,
+      "n_positions": 16,
+      "n_unique_codes_pooled": 45,
+      "support_size": 45
+    },
+    "8": {
+      "pooled_marginal_nats": 4.017131329961831,
+      "mean_per_position_nats": 3.914508446340516,
+      "per_position_min_nats": 3.586741374423371,
+      "per_position_max_nats": 4.240953440945853,
+      "n_positions": 64,
+      "n_unique_codes_pooled": 362,
+      "support_size": 362
+    },
+    "16": {
+      "pooled_marginal_nats": 5.837627774080003,
+      "mean_per_position_nats": 5.728894386919318,
+      "per_position_min_nats": 5.499425052013331,
+      "per_position_max_nats": 5.99329902542361,
+      "n_positions": 256,
+      "n_unique_codes_pooled": 1556,
+      "support_size": 1556
+    },
+    "24": {
+      "pooled_marginal_nats": 6.959937713976717,
+      "mean_per_position_nats": 6.8690622946413935,
+      "per_position_min_nats": 6.567950062298626,
+      "per_position_max_nats": 7.136241192889962,
+      "n_positions": 576,
+      "n_unique_codes_pooled": 2148,
+      "support_size": 2148
+    },
+    "32": {
+      "pooled_marginal_nats": 7.604143308572661,
+      "mean_per_position_nats": 7.468075047324248,
+      "per_position_min_nats": 7.095083710048957,
+      "per_position_max_nats": 7.567024660045617,
+      "n_positions": 1024,
+      "n_unique_codes_pooled": 2149,
+      "support_size": 2149
+    }
+  },
+  "per_trainable_pooled_marginal_nats": [
+    0.8004642393474792,
+    2.394035290816505,
+    4.017131329961831,
+    5.837627774080003,
+    6.959937713976717,
+    7.604143308572661
+  ],
+  "per_trainable_mean_per_position_nats": [
+    0.7953870122893665,
+    2.3579839326067993,
+    3.914508446340516,
+    5.728894386919318,
+    6.8690622946413935,
+    7.468075047324248
+  ]
+}

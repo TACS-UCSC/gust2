@@ -52,45 +52,67 @@ def _mean_curve(scaleT):
     return Ts, [float(np.mean(scaleT[t])) for t in Ts]
 
 
+# Colorblind-safe, redundant encoding (robust to SEVERE CVD incl. monochromacy):
+# cividis is CVD-designed + lightness-ordered (so scale order survives even with
+# zero color perception), AND each scale gets a distinct MARKER so the series are
+# separable by shape alone. Fixed scale->(color,marker) map so a given scale looks
+# identical across all three panels. Scale 1 (global token, JS=dH=0) is dropped.
+ALL_SCALES = [2, 4, 8, 16, 24, 32]
+_MARKERS = ["o", "s", "^", "D", "v", "P"]
+_COLORS = plt.cm.cividis(np.linspace(0.04, 0.96, len(ALL_SCALES)))
+SCALE_STYLE = {s: (_COLORS[i], _MARKERS[i]) for i, s in enumerate(ALL_SCALES)}
+
+
+def render(js, dH, output, mean_overlay):
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    for ci, sc in enumerate(SCS):
+        ax = axes[ci]
+        scales = [s for s in sorted(js[sc]) if s in SCALE_STYLE]   # drop scale 1
+        for s in scales:
+            if s not in js[sc]:
+                continue
+            col, mk = SCALE_STYLE[s]
+            Ts, ys = _mean_curve(js[sc][s])
+            ax.plot(Ts, ys, marker=mk, ms=7, mew=0.6, mec="0.15",
+                    color=col, lw=1.8, alpha=0.5, label=f"scale {s}")
+        # mean-JS overlay: heavy BLACK line (max contrast under all CVD), opaque so
+        # it pops against the faded per-scale lines. Mean over shown scales (>=2).
+        if mean_overlay:
+            Tset = sorted({t for s in scales for t in js[sc][s]})
+            ym = [float(np.mean([np.mean(js[sc][s][t])
+                                 for s in scales if t in js[sc][s]])) for t in Tset]
+            ax.plot(Tset, ym, color="black", lw=3.0, marker="*", ms=11,
+                    label="mean (scales >=2)", zorder=10)
+        ax.axvline(APRIORI_T[sc], color="0.45", ls="--", lw=1.6, alpha=0.9, zorder=1)
+        ax.grid(alpha=0.3)
+        ax.set_title(f"{sc}  (a-priori T*={APRIORI_T[sc]})")
+        ax.set_xlabel("sampling temperature T")
+        if ci == 0:
+            ax.set_ylabel("JS divergence (drift magnitude)")
+    # single legend, in the sc1941 (rightmost) panel, handles forced opaque so the
+    # faded per-scale lines are still legible in the key.
+    leg = axes[2].legend(fontsize=8, ncol=2, loc="upper right")
+    for lh in getattr(leg, "legend_handles", getattr(leg, "legendHandles", [])):
+        lh.set_alpha(1.0)
+    fig.suptitle("Per-scale token-distribution drift vs temperature (mean over cells), by token count."
+                 + (" [mean-JS overlay]" if mean_overlay else ""),
+                 fontsize=12, y=1.02)
+    fig.tight_layout()
+    import os
+    os.makedirs(os.path.dirname(output), exist_ok=True)
+    fig.savefig(output, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    print(f"saved {output}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sizes", nargs="+", default=["small", "medium", "large"])
-    ap.add_argument("--output", default="plots/scale_drift/scale_drift.png")
+    ap.add_argument("--output_dir", default="plots/scale_drift")
     a = ap.parse_args()
     js, dH = fetch(a.sizes)
-
-    fig, axes = plt.subplots(2, 3, figsize=(16, 9), sharex="col")
-    for ci, sc in enumerate(SCS):
-        scales = sorted(js[sc])
-        cmap = plt.cm.viridis(np.linspace(0, 0.9, len(scales)))
-        for col, (metric, ylab, ax) in enumerate([
-                (js, "JS divergence (drift magnitude)", axes[0, ci]),
-                (dH, "signed entropy gap dH (bits)", axes[1, ci])]):
-            for sci, s in enumerate(scales):
-                if s not in metric[sc]:
-                    continue
-                Ts, ys = _mean_curve(metric[sc][s])
-                ax.plot(Ts, ys, marker="o", ms=4, color=cmap[sci], label=f"scale {s}")
-            ax.axvline(APRIORI_T[sc], color="k", ls="--", lw=1.4, alpha=0.7)
-            if metric is dH:
-                ax.axhline(0, color="0.6", lw=0.8)
-            ax.grid(alpha=0.3)
-            if ci == 0:
-                ax.set_ylabel(ylab)
-        axes[0, ci].set_title(f"{sc}  (a-priori T*={APRIORI_T[sc]})")
-        axes[1, ci].set_xlabel("sampling temperature T")
-        axes[0, ci].legend(fontsize=7, ncol=2)
-    axes[0, 2].text(0.98, 0.95, "high JS at coarse scale = collapse;\n"
-                    "high JS at fine scale = over-spread", transform=axes[0, 2].transAxes,
-                    fontsize=8, ha="right", va="top", color="0.3")
-    fig.suptitle("Per-scale token-distribution drift vs temperature (mean over cells), by token count.\n"
-                 "Refined companion to pixel-EMD: localizes drift to coarse-vs-fine scales and resolves collapse (dH<0) vs over-spread (dH>0).",
-                 fontsize=12, y=1.0)
-    fig.tight_layout()
-    import os
-    os.makedirs(os.path.dirname(a.output), exist_ok=True)
-    fig.savefig(a.output, dpi=140, bbox_inches="tight")
-    print(f"saved {a.output}")
+    render(js, dH, f"{a.output_dir}/scale_drift_cb.png", mean_overlay=False)
+    render(js, dH, f"{a.output_dir}/scale_drift_cb_mean.png", mean_overlay=True)
 
 
 if __name__ == "__main__":

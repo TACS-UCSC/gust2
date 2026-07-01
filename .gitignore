@@ -5,3 +5,30 @@ checkpoints*/
 *.eqx
 *.npz
 .venv/
+utility/
+bestrun/
+
+# large local data / artifacts (regenerable or Bridges-resident)
+experiments/
+codebook_artifacts/
+kernelenvs/
+papers/
+presentation/
+*.tar.gz
+
+# plots: track only the provenance README + derived-metric CSVs; pngs are regenerable
+plots/**
+!plots/*/
+!plots/README.md
+!plots/**/*.csv
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.snm
+*.nav
+*.fls
+*.fdb_latexmk
+paper/*.pdf

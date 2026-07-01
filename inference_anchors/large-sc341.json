@@ -1,0 +1,78 @@
+{
+  "tokens_path": "codebook_artifacts/tokens/large-sc341.npz",
+  "n_frames": 30000,
+  "effective_vocab_size": 2038,
+  "scales": [
+    1,
+    2,
+    4,
+    8,
+    16
+  ],
+  "first_trainable_scale": 1,
+  "trainable_scale_indices": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "per_scale": {
+    "1": {
+      "pooled_marginal_nats": -0.0,
+      "mean_per_position_nats": 0.0,
+      "per_position_min_nats": -0.0,
+      "per_position_max_nats": -0.0,
+      "n_positions": 1,
+      "n_unique_codes_pooled": 1,
+      "support_size": 1
+    },
+    "2": {
+      "pooled_marginal_nats": 1.8444832823562316,
+      "mean_per_position_nats": 1.8270613864033631,
+      "per_position_min_nats": 1.7835346501054552,
+      "per_position_max_nats": 1.8719902682347511,
+      "n_positions": 4,
+      "n_unique_codes_pooled": 20,
+      "support_size": 20
+    },
+    "4": {
+      "pooled_marginal_nats": 4.007067400789878,
+      "mean_per_position_nats": 3.9435827038049736,
+      "per_position_min_nats": 3.767336635283254,
+      "per_position_max_nats": 4.16804592048605,
+      "n_positions": 16,
+      "n_unique_codes_pooled": 152,
+      "support_size": 152
+    },
+    "8": {
+      "pooled_marginal_nats": 6.130987625813204,
+      "mean_per_position_nats": 5.904057915288782,
+      "per_position_min_nats": 5.6228826207642095,
+      "per_position_max_nats": 6.289179439782197,
+      "n_positions": 64,
+      "n_unique_codes_pooled": 1111,
+      "support_size": 1111
+    },
+    "16": {
+      "pooled_marginal_nats": 7.578948396760357,
+      "mean_per_position_nats": 7.265714176770705,
+      "per_position_min_nats": 6.954984760463342,
+      "per_position_max_nats": 7.432138169696074,
+      "n_positions": 256,
+      "n_unique_codes_pooled": 2038,
+      "support_size": 2038
+    }
+  },
+  "per_trainable_pooled_marginal_nats": [
+    1.8444832823562316,
+    4.007067400789878,
+    6.130987625813204,
+    7.578948396760357
+  ],
+  "per_trainable_mean_per_position_nats": [
+    1.8270613864033631,
+    3.9435827038049736,
+    5.904057915288782,
+    7.265714176770705
+  ]
+}

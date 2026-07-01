@@ -8,10 +8,12 @@
 #   * same-position substitution noise (--substitution_rate 0.1)
 #
 # Submission pattern mirrors bridges/sweep_nsp.sh: one Slurm job per
-# combo, 12 h walltime, auto-resume via training_state.json + persistent
-# wandb id. Resubmit the script (or a single combo) to continue past
-# wall clock. 4× H100-80 per job, global batch 64 (16/GPU) — matches
-# the robust recipe validated on Derecho's 4× A100-40.
+# combo, auto-resume via training_state.json + persistent wandb id.
+# Walltime is per-sc-config: sc341/sc917 → 12 h, sc1941 → 24 h (sc1941
+# trains slower and otherwise can't fit 400 epochs in one shot).
+# Resubmit the script (or a single combo) to continue past wall clock.
+# 4× H100-80 per job, global batch 64 (16/GPU) — matches the robust
+# recipe validated on Derecho's 4× A100-40.
 #
 # Usage:
 #   ./scripts/bridges/sweep_robust_scaling.sh                   # all 15 (small)
@@ -57,6 +59,14 @@ lr_for_sccfg() {
     case "$1" in
         sc1941) echo 1e-4 ;;
         *)      echo 2e-4 ;;
+    esac
+}
+# sc1941 trains slowly enough that 12h walltimes leave runs mid-training;
+# bump to 24h so each submission can hit 400 epochs in one shot.
+walltime_for_sccfg() {
+    case "$1" in
+        sc1941) echo "24:00:00" ;;
+        *)      echo "12:00:00" ;;
     esac
 }
 
@@ -154,7 +164,7 @@ if [ "${LIST_ONLY}" = true ]; then
     echo "Robust knobs: substitution_rate=${SUBSTITUTION_RATE}, n_refine=${N_REFINE_LAYERS}"
     echo "GPUs:         4× H100-80 per job"
     echo "Batch/LR:     sc341/sc917 → 128 (32/GPU) @ 2e-4   sc1941 → 64 (16/GPU) @ 1e-4"
-    echo "Walltime:     12h/job — resubmit to resume."
+    echo "Walltime:     sc341/sc917 → 12h    sc1941 → 24h   (resubmit to resume past wallclock)"
     exit 0
 fi
 
@@ -184,7 +194,7 @@ echo "  Wandb project:    ${WANDB_PROJECT}"
 echo "  Substitution rate:${SUBSTITUTION_RATE}"
 echo "  GPUs/job:         4× H100-80 (GPU-shared)"
 echo "  Batch/LR:         sc341/sc917 → 128 @ 2e-4   sc1941 → 64 @ 1e-4"
-echo "  Walltime:         12h/job (resubmit to resume)"
+echo "  Walltime:         sc341/sc917 → 12h    sc1941 → 24h   (resubmit to resume)"
 echo "  Dry run:          ${DRY_RUN}"
 echo "=========================================="
 
@@ -211,6 +221,7 @@ for spec in "${SELECTED[@]}"; do
     WANDB_GROUP="${SC_CFG}-scaling"
     BATCH_SIZE=$(batch_for_sccfg "${SC_CFG}")
     LR=$(lr_for_sccfg "${SC_CFG}")
+    WALLTIME=$(walltime_for_sccfg "${SC_CFG}")
     PER_GPU=$((BATCH_SIZE / 4))
 
     RESUME_FLAG=""
@@ -227,7 +238,7 @@ for spec in "${SELECTED[@]}"; do
 #SBATCH -p GPU-shared
 #SBATCH -N 1
 #SBATCH --gres=gpu:h100-80:4
-#SBATCH -t 12:00:00
+#SBATCH -t ${WALLTIME}
 #SBATCH -o ${LOG_DIR}/${RUN_NAME}-%j.out
 #SBATCH -e ${LOG_DIR}/${RUN_NAME}-%j.err
 
@@ -245,6 +256,7 @@ echo "Job:           \${SLURM_JOB_ID}"
 echo "Node:          \$(hostname)"
 echo "Started:       \$(date)"
 echo "GPUs:          4× H100-80 (GPU-shared)"
+echo "Walltime:      ${WALLTIME}"
 echo "Run:           ${RUN_NAME}"
 echo "Arch:          ${N_LAYER}L, n_embd=${N_EMBD}, n_head=${N_HEAD}, refine=${N_REFINE_LAYERS}"
 echo "Tokens:        ${TOKENS_PATH}"

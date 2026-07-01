@@ -1,0 +1,78 @@
+{
+  "tokens_path": "codebook_artifacts/tokens/medium-sc341.npz",
+  "n_frames": 30000,
+  "effective_vocab_size": 2094,
+  "scales": [
+    1,
+    2,
+    4,
+    8,
+    16
+  ],
+  "first_trainable_scale": 1,
+  "trainable_scale_indices": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "per_scale": {
+    "1": {
+      "pooled_marginal_nats": -0.0,
+      "mean_per_position_nats": 0.0,
+      "per_position_min_nats": -0.0,
+      "per_position_max_nats": -0.0,
+      "n_positions": 1,
+      "n_unique_codes_pooled": 1,
+      "support_size": 1
+    },
+    "2": {
+      "pooled_marginal_nats": 1.5601905980999753,
+      "mean_per_position_nats": 1.537830801743498,
+      "per_position_min_nats": 1.4966688267089006,
+      "per_position_max_nats": 1.5928577531014603,
+      "n_positions": 4,
+      "n_unique_codes_pooled": 17,
+      "support_size": 17
+    },
+    "4": {
+      "pooled_marginal_nats": 3.619480473828096,
+      "mean_per_position_nats": 3.5617655824332255,
+      "per_position_min_nats": 3.4005477560817265,
+      "per_position_max_nats": 3.799037474026783,
+      "n_positions": 16,
+      "n_unique_codes_pooled": 145,
+      "support_size": 145
+    },
+    "8": {
+      "pooled_marginal_nats": 5.9457656349622106,
+      "mean_per_position_nats": 5.7229610217249895,
+      "per_position_min_nats": 5.4127119100594205,
+      "per_position_max_nats": 6.104532379010006,
+      "n_positions": 64,
+      "n_unique_codes_pooled": 1177,
+      "support_size": 1177
+    },
+    "16": {
+      "pooled_marginal_nats": 7.616863188375779,
+      "mean_per_position_nats": 7.290751307856532,
+      "per_position_min_nats": 6.999857289936523,
+      "per_position_max_nats": 7.457995959429496,
+      "n_positions": 256,
+      "n_unique_codes_pooled": 2094,
+      "support_size": 2094
+    }
+  },
+  "per_trainable_pooled_marginal_nats": [
+    1.5601905980999753,
+    3.619480473828096,
+    5.9457656349622106,
+    7.616863188375779
+  ],
+  "per_trainable_mean_per_position_nats": [
+    1.537830801743498,
+    3.5617655824332255,
+    5.7229610217249895,
+    7.290751307856532
+  ]
+}

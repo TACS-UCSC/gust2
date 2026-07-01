@@ -1,0 +1,142 @@
+% =====================================================================
+%  gust2 / TMLR — seeded bibliography (the named foils + lineage).
+%  NOTE ON VERIFICATION: entries below the "RECENT — VERIFY" divider were sourced from this
+%  project's June-2026 literature sweep and are post knowledge-cutoff. Confirm arXiv id / venue /
+%  author list against arXiv + OpenReview before submission. The pre-2025 entries are stable.
+% =====================================================================
+
+% ---- Next-scale generation (architectural parent; no PDE applications) ----
+@inproceedings{tian2024var,
+  title     = {Visual Autoregressive Modeling: Scalable Image Generation via Next-Scale Prediction},
+  author    = {Tian, Keyu and Jiang, Yi and Yuan, Zehuan and Peng, Bingyue and Wang, Liwei},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2024},
+  note      = {arXiv:2404.02905}
+}
+
+% ---- Continuous PDE-stability control (the contrast bucket) ----
+@inproceedings{lippe2023pderefiner,
+  title     = {{PDE-Refiner}: Achieving Accurate Long Rollouts with Neural {PDE} Solvers},
+  author    = {Lippe, Phillip and Veeling, Bastiaan S. and Perdikaris, Paris and Turner, Richard E. and Brandstetter, Johannes},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2023},
+  note      = {arXiv:2308.05732}
+}
+@inproceedings{stachenfeld2022learned,
+  title     = {Learned Coarse Models for Efficient Turbulence Simulation},
+  author    = {Stachenfeld, Kimberly and Fielding, Drummond B. and Kochkov, Dmitrii and Cranmer, Miles and Pfaff, Tobias and Godwin, Jonathan and Cui, Can and Ho, Shirley and Battaglia, Peter and Sanchez-Gonzalez, Alvaro},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2022},
+  note      = {arXiv:2112.15275; training-noise injection}
+}
+@inproceedings{brandstetter2022mppde,
+  title     = {Message Passing Neural {PDE} Solvers},
+  author    = {Brandstetter, Johannes and Worrall, Daniel and Welling, Max},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2022},
+  note      = {arXiv:2202.03376; the pushforward trick}
+}
+
+% ---- Discrete / tokenized turbulence (closest direct predecessor) ----
+@article{momenifar2021dimension,
+  title   = {Dimension Reduced Turbulent Flow Data from Deep Vector Quantizers},
+  author  = {Momenifar, Mohammadreza and Diao, Enmao and Tarokh, Vahid and Bragg, Andrew D.},
+  journal = {arXiv preprint arXiv:2112.03469},
+  year    = {2021},
+  note    = {single-scale VQ-AE + transformer; notes AR degradation, no long-rollout stability claim}
+}
+
+% ---- Scaling laws ----
+@article{hoffmann2022chinchilla,
+  title   = {Training Compute-Optimal Large Language Models},
+  author  = {Hoffmann, Jordan and Borgeaud, Sebastian and Mensch, Arthur and others},
+  journal = {arXiv preprint arXiv:2203.15556},
+  year    = {2022}
+}
+@article{henighan2020scaling,
+  title   = {Scaling Laws for Autoregressive Generative Modeling},
+  author  = {Henighan, Tom and Kaplan, Jared and Katz, Mor and others},
+  journal = {arXiv preprint arXiv:2010.14701},
+  year    = {2020}
+}
+@inproceedings{muennighoff2023scaling,
+  title     = {Scaling Data-Constrained Language Models},
+  author    = {Muennighoff, Niklas and Rush, Alexander M. and Barak, Boaz and others},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2023},
+  note      = {arXiv:2305.16264}
+}
+
+% ---- Self-predictive / latent world models (future-work lineage) ----
+@inproceedings{schwarzer2021spr,
+  title     = {Data-Efficient Reinforcement Learning with Self-Predictive Representations},
+  author    = {Schwarzer, Max and Anand, Ankesh and Goel, Rishab and Hjelm, R Devon and Courville, Aaron and Bachman, Philip},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2021},
+  note      = {arXiv:2007.05929}
+}
+@article{hafner2023dreamerv3,
+  title   = {Mastering Diverse Domains through World Models},
+  author  = {Hafner, Danijar and Pasukonis, Jurgis and Ba, Jimmy and Lillicrap, Timothy},
+  journal = {arXiv preprint arXiv:2301.04104},
+  year    = {2023}
+}
+@inproceedings{yan2023teco,
+  title     = {Temporally Consistent Transformers for Video Generation},
+  author    = {Yan, Wilson and Hafner, Danijar and James, Stephen and Abbeel, Pieter},
+  booktitle = {International Conference on Machine Learning (ICML)},
+  year      = {2023},
+  note      = {arXiv:2210.02396; VQ + MaskGIT for long video rollouts}
+}
+
+% ================= RECENT — VERIFY arXiv id / venue before submission =================
+
+@article{nguyen2025physix,
+  title   = {{PhysiX}: A Foundation Model for Physics Simulation},
+  author  = {Nguyen, Tung and others},
+  journal = {arXiv preprint arXiv:2506.17774},
+  year    = {2025},
+  note    = {VERIFY. 4.5B params, Cosmos/FSQ tokenizer, raster next-token AR + refinement CNN}
+}
+@article{serrano2024zebra,
+  title   = {{Zebra}: In-Context and Generative Pretraining for Solving Parametric {PDE}s},
+  author  = {Serrano, Louis and others},
+  journal = {arXiv preprint arXiv:2410.03437},
+  year    = {2024},
+  note    = {VERIFY. VQ-VAE -> raster next-token AR for parametric PDEs}
+}
+@article{nextlat2025,
+  title   = {Next-Latent Prediction Transformers Learn Compact World Models},
+  author  = {Anonymous},
+  journal = {arXiv preprint arXiv:2511.05963},
+  year    = {2025},
+  note    = {VERIFY author/title. The trigger paper for the proposed aux loss}
+}
+@article{dcwm2025,
+  title   = {Discrete Codebook World Models},
+  author  = {Anonymous},
+  journal = {arXiv preprint arXiv:2503.00653},
+  year    = {2025},
+  note    = {VERIFY. FSQ codes, CE against stop-grad of own next code; closest discrete loss form}
+}
+@article{twister2025,
+  title   = {{TWISTER}: Self-Predictive World Models with Multi-Step Latent Unroll},
+  author  = {Anonymous},
+  journal = {arXiv preprint arXiv:2503.04416},
+  year    = {2025},
+  note    = {VERIFY. K=10-step latent unroll rationale}
+}
+@article{thermalizer2025,
+  title   = {Thermalizer: Stable Autoregressive Rollouts via Diffusion Projection},
+  author  = {Pedersen, Chris and Zanna, Laure and Bruna, Joan},
+  journal = {arXiv preprint arXiv:2503.18731},
+  year    = {2025},
+  note    = {VERIFY. diffusion projection back onto the attractor}
+}
+@article{practicalscaling2026,
+  title   = {Practical Scaling Laws for Data-Constrained Neural {PDE} Surrogates},
+  author  = {Anonymous},
+  journal = {arXiv preprint arXiv:2605.09189},
+  year    = {2026},
+  note    = {VERIFY. closest analog; validates on FNOs / PDEBench}
+}

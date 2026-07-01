@@ -1,0 +1,91 @@
+{
+  "tokens_path": "codebook_artifacts/tokens/large-sc917.npz",
+  "n_frames": 30000,
+  "effective_vocab_size": 1520,
+  "scales": [
+    1,
+    2,
+    4,
+    8,
+    16,
+    24
+  ],
+  "first_trainable_scale": 1,
+  "trainable_scale_indices": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "per_scale": {
+    "1": {
+      "pooled_marginal_nats": -0.0,
+      "mean_per_position_nats": 0.0,
+      "per_position_min_nats": -0.0,
+      "per_position_max_nats": -0.0,
+      "n_positions": 1,
+      "n_unique_codes_pooled": 1,
+      "support_size": 1
+    },
+    "2": {
+      "pooled_marginal_nats": 0.847828220410491,
+      "mean_per_position_nats": 0.8358932374455825,
+      "per_position_min_nats": 0.8019594384996478,
+      "per_position_max_nats": 0.8538703260690792,
+      "n_positions": 4,
+      "n_unique_codes_pooled": 9,
+      "support_size": 9
+    },
+    "4": {
+      "pooled_marginal_nats": 2.7624121594417095,
+      "mean_per_position_nats": 2.7200446239614404,
+      "per_position_min_nats": 2.6137561193780225,
+      "per_position_max_nats": 2.8858655345537763,
+      "n_positions": 16,
+      "n_unique_codes_pooled": 43,
+      "support_size": 43
+    },
+    "8": {
+      "pooled_marginal_nats": 4.371721250440228,
+      "mean_per_position_nats": 4.244344377460834,
+      "per_position_min_nats": 3.819917549253744,
+      "per_position_max_nats": 4.736104186150543,
+      "n_positions": 64,
+      "n_unique_codes_pooled": 514,
+      "support_size": 514
+    },
+    "16": {
+      "pooled_marginal_nats": 6.74573400233724,
+      "mean_per_position_nats": 6.5866850713870235,
+      "per_position_min_nats": 6.266205316264735,
+      "per_position_max_nats": 6.908332305593041,
+      "n_positions": 256,
+      "n_unique_codes_pooled": 1498,
+      "support_size": 1498
+    },
+    "24": {
+      "pooled_marginal_nats": 7.2874431019229045,
+      "mean_per_position_nats": 7.189939614592845,
+      "per_position_min_nats": 7.046022652545101,
+      "per_position_max_nats": 7.252600155857397,
+      "n_positions": 576,
+      "n_unique_codes_pooled": 1520,
+      "support_size": 1520
+    }
+  },
+  "per_trainable_pooled_marginal_nats": [
+    0.847828220410491,
+    2.7624121594417095,
+    4.371721250440228,
+    6.74573400233724,
+    7.2874431019229045
+  ],
+  "per_trainable_mean_per_position_nats": [
+    0.8358932374455825,
+    2.7200446239614404,
+    4.244344377460834,
+    6.5866850713870235,
+    7.189939614592845
+  ]
+}
