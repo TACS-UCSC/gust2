@@ -42,12 +42,17 @@ specs) and `paper/OUTLINE.md` (claim spine). Keep this the single source of trut
   continuous z_t→z_{t+1} (MSE), param-matched to flagship NSP. **The surgically clean discrete-axis isolation
   — the single most load-bearing baseline.** Add droppable training-noise rows (σ∈{0,lo,hi}). *(= BASELINES_SPEC B1, Option B.)*
 
-- [ ] **B2 — Non-quantized continuous *pixel* (off-the-shelf FNO)** 🔴
-  *Tag: disc-vs-cont (recognizable PDE-community anchor).* PyTorch FNO (user to point at impl; likely
-  `neuraloperator`), 1ch, 1-frame conditioning, dataset-stat norm. **Keep the +noise / +pushforward variants**
-  (that's the Stachenfeld "did you try the 2-line fix?" armor — don't drop them just because we swapped U-Net→FNO).
-  ⚠️ cross-framework: needs JAX↔PyTorch data + eval parity (same start frames, same 2000-step driver, same metrics).
-  *(Replaces/【or augments】BASELINES_SPEC B2 U-Net; decide U-Net-too? — see "anything else".)*
+- [~] **B2 — Non-quantized continuous *pixel* (next-ViT)** 🔴 — **DECIDED 2026-07-01: ViT-AE replaces FNO/U-Net.
+  Tooling ready; awaiting Bridges.**
+  *Tag: disc-vs-cont (architecture-controlled cell).* The tokenizer backbone (vit_ae enc+dec) end-to-end,
+  quantization stripped, MSE regression t0→t1 (`train_next_vit.py`). Kills the ⚠️ cross-framework parity cost
+  outright and upgrades the matrix: same blocks/stem/latent-grid as the VQ-VAE, so quantize-or-don't is the only
+  changed variable (30.9M / 57.1M = exact Small/Medium parity). **+noise (σ∈{0.01,0.1}×pixel-std) / +pushforward
+  variants kept** (Stachenfeld armor). Trade-off owned: no PDE-community U-Net anchor — PDE-Refiner stays the
+  related-work foil, U-Net/FNO demoted to reviewer-response. 5 arms; launcher
+  `scripts/bridges/baselines/train_next_vit.sh` chains train → rollout (8 ICs × 2000 steps, f32, deterministic,
+  IC-spread ensemble per spec) → analysis (GT/one-step/rollout spectra + band traces = F7.1 raw material).
+  CPU smoke-tested end-to-end (all 3 variants + resume + rollout + analysis) 2026-07-01. *(= BASELINES_SPEC B2, rewritten.)*
 
 - [~] **B4 — No-training controls (mostly resolved — demoted)** 🟢
   *Tag: metric.* The "just a lookup table" concern is **moot by protocol**: rollouts continue forward from where
@@ -138,7 +143,10 @@ specs) and `paper/OUTLINE.md` (claim spine). Keep this the single source of trut
 - [ ] **T1 — Correlation / decorrelation-time metric** 🟢 in `analyze_rollout.py` (PDE-Refiner-lineage reviewers expect it). *(audit P1-8.)*
 - [x] **T2 — Tokenizer teacher-forced per-scale code entropy** ✅ — `plots/per_scale_temp/target_entropy_profile.png`
   (from the 06-26→28 per-scale-temp sweep). Unblocks I1's anchored bound.
-- [ ] **T3 — Continuous closed-loop rollout driver + pixel-input analysis path** 🟡 — shared infra for B1/B2 (decode hook for latent, pixel bypass for FNO).
+- [~] **T3 — Continuous closed-loop rollout driver + pixel-input analysis path** 🟡 — **pixel half DONE 2026-07-01:**
+  `rollout_continuous.py` (deterministic f32 closed loop, IC-spread ensemble) + `analyze_continuous.py` (imports
+  analyze_rollout's exact spectral machinery; adds one-step column + per-step band-energy traces). Remaining: B1
+  latent mode (decode hook) — slots into `rollout_continuous.py` with `train_latent.py`.
 - [x] **T4 — Per-scale token-distribution drift metric** ✅ *(analysis, 06-29→30)* — `scale_distribution_drift.py`
   (TV + JS + signed ΔH per scale) + N=128 drift sweep → `plots/scale_drift/`. Catches disjoint-code shift that
   entropy/EMD miss; token-space window-invariance ⇒ climate target computable from training data. Refines C4.
@@ -160,7 +168,8 @@ specs) and `paper/OUTLINE.md` (claim spine). Keep this the single source of trut
 2. **Cheap, parallel, now:** E1 (analysis), E5, T1, T2, I3 (all 🟢, no training). B4 mostly resolved.
 3. **E2** — the one flagship sc917 mask×sampling ablation, n_traj≥8 (E3 already done, E6 folded in).
 4. **I1/I2** after T2 (tokenizer-entropy anchor); yardstick (E3) already in hand.
-5. **B1 → B2** after T3 (continuous driver). B2 (FNO) carries the cross-framework parity cost.
+5. ~~B1 → B2 after T3~~ **B2 tooling done first (next-ViT decision killed its implementation lift); B1 next —
+   reuses T3's driver + analyzer.**
 6. **E4** anytime (disambiguation/claim-reduction). **S1/S2** stretch.
 
 **Self-contained vs gated:** disc-vs-cont (B1/B2/B3) is the only pillar with *zero* current evidence — prioritize.

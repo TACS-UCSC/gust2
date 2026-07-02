@@ -64,3 +64,66 @@ class VQVAEDataset:
             if self.sharding is not None:
                 batch = jax.device_put(batch, self.sharding)
             yield batch
+
+
+class FramePairDataset:
+    """Consecutive-frame tuples from HDF5 for next-frame regression baselines.
+
+    Yields (x_t, x_{t+1}, ..., x_{t+horizon}) tuples of (B, 1, H, W) batches,
+    sharded across the device mesh. Frame pairing follows the NSP convention:
+    frames i and i+1 in the HDF5 time series are consecutive in time.
+
+    Args:
+        horizon: number of future frames per sample (1 = pairs for one-step
+            MSE, 2 = triples for the pushforward trick).
+    """
+
+    def __init__(self, path: str, field: str = "omega", batch_size: int = 16,
+                 horizon: int = 1, shuffle: bool = True, seed: int = 42,
+                 mesh=None, sample_start: int = 0, sample_stop: int = None,
+                 drop_last: bool = True):
+        with h5py.File(path, "r") as f:
+            self.data = f[f"fields/{field}"][sample_start:sample_stop]  # (N, H, W)
+
+        self.data = self.data[:, None, :, :]                 # (N, 1, H, W)
+        self.horizon = horizon
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        self.rng = np.random.RandomState(seed)
+        self.sharding = (
+            NamedSharding(mesh, P("batch", None, None, None))
+            if mesh is not None else None
+        )
+
+    @property
+    def n_pairs(self) -> int:
+        return self.data.shape[0] - self.horizon
+
+    @property
+    def sample_shape(self) -> tuple:
+        return self.data.shape[1:]                           # (1, H, W)
+
+    @property
+    def pixel_std(self) -> float:
+        return float(self.data.std())
+
+    def __len__(self) -> int:
+        if self.drop_last:
+            return self.n_pairs // self.batch_size
+        return (self.n_pairs + self.batch_size - 1) // self.batch_size
+
+    def __iter__(self):
+        starts = np.arange(self.n_pairs)
+        if self.shuffle:
+            self.rng.shuffle(starts)
+
+        for i in range(len(self)):
+            batch_idx = starts[i * self.batch_size:(i + 1) * self.batch_size]
+            frames = []
+            for h in range(self.horizon + 1):
+                arr = jnp.array(self.data[batch_idx + h])
+                if self.sharding is not None:
+                    arr = jax.device_put(arr, self.sharding)
+                frames.append(arr)
+            yield tuple(frames)

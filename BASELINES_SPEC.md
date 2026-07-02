@@ -44,17 +44,39 @@ flipped is quantize-or-don't.
 - Expected: latent high-k attenuation compounding over rollout / eventual blow-up;
   discrete stays at the codebook floor. This is the pillar-2 money figure.
 
-## B2 — Pixel-space continuous trio (pillar 1 hardening, field anchor)
+## B2 — Pixel-space continuous ViT (pillar 1 hardening, field anchor)
 
-- Modern U-Net (PDE-Refiner-style conventions: residual blocks, GroupNorm, attention at
-  coarse levels), 1 channel in/out, 1-frame conditioning, dataset-stat normalization.
-- Sizes: ~31M and ~57M (loose match to Small/Medium budgets; exact matching across
-  architectures is theater — state the counts).
-- Variants per size: (a) plain MSE, (b) +training noise — sweep 2 sigma values at one
-  size, carry best sigma to the other, (c) +pushforward trick (2-step unroll, gradient
-  detached through step 1). Max 8 runs, likely 6.
-- PDE-Refiner proper: deferred to conference version; named foil in related work.
-- Same consecutive-pair sampling and train/val split as the token pipeline.
+- **Decision 2026-07-01: ViT-AE next-frame regressor replaces the U-Net/FNO plan.**
+  The tokenizer backbone (`vit_ae` Encoder+Decoder) wired end-to-end, quantization
+  stripped, trained from scratch to regress t+1 from t with MSE
+  (`train_next_vit.py`). Rationale: (a) zero cross-framework parity cost — the
+  DECIDE risk that had B2 on the chopping block; (b) architecture control: same
+  blocks, same 8x conv stem, same 32x32 latent grid as the VQ-VAE, so the
+  pixel-continuous cell differs from the discrete pipeline ONLY along the matrix
+  axes (quantize-or-don't, regress-or-classify). Mechanistically this is the M5
+  exhibit isolated: the continuous model re-encodes its own decoded output every
+  closed-loop step (re-pays the stem's spectral cost per step) while the discrete
+  pipeline pays it once at readout. Strawman defense: the latent is 512x32x32 =
+  8x MORE dims than the 256^2 pixel grid — a locality/spectral bias, not a
+  dimensionality bottleneck — and the VQ recon floor shows what this backbone can
+  reconstruct. Trade-off owned in the paper: we lose the PDE-community U-Net
+  anchor; PDE-Refiner stays the named related-work foil, U-Net/FNO becomes a
+  reviewer-response experiment.
+- Sizes: 30.9M (depth 5/5) and 57.1M (10/10) — exact param parity with the
+  Small/Medium tokenizer enc+dec by construction.
+- Variants: (a) plain MSE, (b) +training noise sigma in {0.01, 0.1} x train pixel
+  std at Small, carry best sigma if a second-size noise row is wanted,
+  (c) +pushforward (2-step unroll, gradient detached through step 1; 2 GPUs for
+  the 2x activation memory). 5 runs.
+- Raw fields, no normalization — parity with the tokenizer's input convention.
+- Same consecutive-pair sampling and train/val split as the token pipeline
+  (train [0, 20000), val [20000, 22000)).
+- Rollout: deterministic closed-loop 2000 steps, 8 ICs spread across the val
+  window (`rollout_continuous.py`, f32 — no bf16 in the recursion); analysis via
+  `analyze_continuous.py` (GT / one-step / rollout spectra, band-energy traces =
+  F7.1 raw material, EMD, snapshots).
+- Launcher: `scripts/bridges/baselines/train_next_vit.sh` (chains train →
+  rollout+analysis per arm).
 
 ## B3 — Flat-VQ tokenizers (raster bound, budget-fidelity Pareto)
 
@@ -99,20 +121,25 @@ All baselines through the same harness: same start frames, 2000 steps, n_traj >=
 
 ## Code items
 
-1. `unet.py` + `train_unet.py` (noise + pushforward flags) — biggest new-code item;
-   JAX/Equinox from scratch.
+1. ~~`unet.py` + `train_unet.py`~~ → **DONE 2026-07-01 as `train_next_vit.py`**
+   (ViT decision above; noise + pushforward flags included).
 2. `train_latent.py` — fork of train_nsp harness, scale machinery removed, MSE loss.
-3. `rollout_continuous.py` — shared closed-loop driver for B1 (latent, with decode
-   hook) and B2 (pixel).
-4. `analyze_rollout.py` — add pixel-input path (bypass token decode) + correlation-time
-   metric (also covers P1 #8).
+3. `rollout_continuous.py` — **DONE (pixel mode)**; B1 latent mode (decode hook)
+   slots in with `train_latent.py`.
+4. Pixel-input analysis: **DONE as `analyze_continuous.py`** — a sibling script
+   importing analyze_rollout's exact spectral/metric machinery (deliberate
+   deviation from "add a path to analyze_rollout.py": zero churn risk to the
+   stable discrete pipeline, numbers still comparable by construction).
+   Correlation-time metric (P1 #8) still TODO, both pipelines.
 5. `controls.py` — persistence + in-mask random sampling.
-6. sbatch templates under `scripts/bridges/baselines/`.
+6. sbatch templates under `scripts/bridges/baselines/` — `train_flat_vq.sh` (B3)
+   and `train_next_vit.sh` (B2) done.
 
 ## Layout & tracking
 
-- Ocean: `experiments/baselines/{latent-mse-*, unet-*}/`, flat tokenizers under
-  `experiments/vqvae/small-flat-sc*/`.
+- Ocean: `experiments/baselines/{latent-mse-*, nextvit-*}/`, flat tokenizers under
+  `experiments/vqvae/small-flat-sc*/`. Each `nextvit-*` arm keeps its `rollout/`
+  and `analysis/` subdirs next to the checkpoint.
 - Wandb: `gust2-baselines` (flat-VQ training may go to `gust2-vqvae` like other
   tokenizer runs; analysis to `gust2-analysis`).
 
@@ -121,8 +148,9 @@ All baselines through the same harness: same start frames, 2000 steps, n_traj >=
 1. **B3 flat-VQ** — config-only, cheapest, and gates the raster section of the paper.
 2. **B4 controls** — scripting only, no GPU.
 3. **B1 latent-MSE** — small code fork, one anchor + noise rows.
-4. **B2 U-Net trio** — biggest implementation lift, start `unet.py` in parallel with
-   B3 training.
+4. **B2 next-ViT arms** — tooling done 2026-07-01; launcher ready to submit
+   alongside B3 (the implementation-lift argument for sequencing it last died
+   with the U-Net).
 
 ## Parked / out of scope
 
