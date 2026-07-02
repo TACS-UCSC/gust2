@@ -142,7 +142,10 @@ def main():
 
     # --- figure ---
     fig, ax = plt.subplots(figsize=(7.5, 7))
-    lims = (0.55, 2.45)
+    t_all = ([r["best_T"] for r in rows] + [r["T_pred"] for r in rows]
+             + [r["safe_lo"] for r in rows if np.isfinite(r["safe_lo"])]
+             + [r["safe_hi"] for r in rows if np.isfinite(r["safe_hi"])])
+    lims = (min(t_all) - 0.25, max(t_all) + 0.25)
     ax.plot(lims, lims, color="0.4", lw=1, ls="--", zorder=1,
             label="perfect prediction (45°)")
     rng = np.random.default_rng(0)      # small x-jitter: best_T is grid-valued
@@ -187,8 +190,8 @@ def main():
         "Data-read T prediction vs swept optimum, per cell\n"
         f"in on-manifold band: {n_ok}/{len(rows)} cells · median "
         f"|T_pred − best_T| = {np.median(abs_err):.2f} ({len(abs_err)} bracketed)\n"
-        f"{n_sat} cells at swept-range edge (arrows) — sc341 hot edge + warm "
-        "sc917 gap runs extend these",
+        f"{n_sat} cells at drift-curve edge (arrows) — resolve via a drift "
+        "pass over the newest rollouts",
         fontsize=10)
     ax.grid(alpha=0.3)
     ax.legend(handles=handles, fontsize=9, loc="upper left")
