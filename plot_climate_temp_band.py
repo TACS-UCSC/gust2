@@ -18,7 +18,8 @@ import numpy as np
 EXPLODED = 1.0
 SCS = ["sc341", "sc917", "sc1941"]
 table = {tuple(k.split("|")): {float(t): v for t, v in d.items()}
-         for k, d in json.load(open("/tmp/n128_table.json")).items()}
+         for k, d in json.load(
+             open("plots/scaling_tempopt_n128/n128_table.json")).items()}
 
 
 def cells_for(sc):

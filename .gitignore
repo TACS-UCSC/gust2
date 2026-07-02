@@ -21,6 +21,9 @@ plots/**
 !plots/*/
 !plots/README.md
 !plots/**/*.csv
+# exception: no in-repo builder for this table (assembled ad-hoc from the N=128
+# sweep); plot_climate_temp_band.py + plot_prediction_vs_outcome.py read it
+!plots/scaling_tempopt_n128/n128_table.json
 
 # LaTeX build artifacts
 *.aux
