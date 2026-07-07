@@ -123,17 +123,19 @@ All baselines through the same harness: same start frames, 2000 steps, n_traj >=
 
 1. ~~`unet.py` + `train_unet.py`~~ → **DONE 2026-07-01 as `train_next_vit.py`**
    (ViT decision above; noise + pushforward flags included).
-2. `train_latent.py` — fork of train_nsp harness, scale machinery removed, MSE loss.
-3. `rollout_continuous.py` — **DONE (pixel mode)**; B1 latent mode (decode hook)
-   slots in with `train_latent.py`.
+2. `train_latent.py` — **DONE 2026-07-06**: NSP-block dynamics (~18.1M, s18-class
+   match at 10 x d384/h6) on frozen enc/dec, per-channel latent-std noise probe.
+3. `rollout_continuous.py` — **DONE (pixel + latent modes, 2026-07-06)**: latent
+   closed loop with per-step frozen-decoder readout; `analyze_continuous.py`
+   one-step column handles `latent_mse` too.
 4. Pixel-input analysis: **DONE as `analyze_continuous.py`** — a sibling script
    importing analyze_rollout's exact spectral/metric machinery (deliberate
    deviation from "add a path to analyze_rollout.py": zero churn risk to the
    stable discrete pipeline, numbers still comparable by construction).
    Correlation-time metric (P1 #8) still TODO, both pipelines.
 5. `controls.py` — persistence + in-mask random sampling.
-6. sbatch templates under `scripts/bridges/baselines/` — `train_flat_vq.sh` (B3)
-   and `train_next_vit.sh` (B2) done.
+6. sbatch templates under `scripts/bridges/baselines/` — `train_flat_vq.sh` (B3),
+   `train_next_vit.sh` (B2), and `train_latent.sh` (B1) done.
 
 ## Layout & tracking
 

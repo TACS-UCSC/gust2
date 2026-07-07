@@ -3,8 +3,12 @@
 Free-runs a deterministic next-frame model from ground-truth initial
 conditions and saves the predicted pixel fields. Serves:
   - B2 (next_vit): pixel-space ViT regressor from train_next_vit.py —
-    x_{t+1} = decoder(encoder(x_t)), all in pixel space.
-  - B1 (latent_mse): slot reserved — added with train_latent.py.
+    x_{t+1} = decoder(encoder(x_t)), all in pixel space. The model
+    re-encodes its own decoded output every step.
+  - B1 (latent_mse): continuous-latent regressor from train_latent.py —
+    closed loop runs ENTIRELY in latent space (z_{t+1} = f(z_t)); the frozen
+    decoder is a per-step READOUT for the saved pixel fields and never feeds
+    back into the recursion. That asymmetry is the point of the baseline.
 
 Ensemble semantics: continuous baselines are DETERMINISTIC at inference, so
 (unlike rollout_nsp.py's fixed-IC sampling ensembles) the only meaningful
@@ -75,6 +79,34 @@ def next_vit_step(model, xb):
     return jax.vmap(lambda s: decoder(encoder(s)))(xb)
 
 
+def load_latent_mse(checkpoint_dir, arch_config):
+    from train_latent import load_latent_model
+    dynamics, encoder, decoder, _ = load_latent_model(
+        checkpoint_dir, arch_config)
+    return dynamics, encoder, decoder
+
+
+@eqx.filter_jit
+def latent_init(model, xb):
+    """(N, 1, H, W) f32 -> (N, C, hw, hw) f32: encode the GT ICs once."""
+    _, encoder, _ = model
+    return jax.vmap(encoder)(xb)
+
+
+@eqx.filter_jit
+def latent_step(model, zb):
+    """(N, C, hw, hw) f32 -> (N, C, hw, hw) f32, latent-space recursion."""
+    dynamics, _, _ = model
+    return jax.vmap(dynamics)(zb)
+
+
+@eqx.filter_jit
+def latent_readout(model, zb):
+    """(N, C, hw, hw) f32 -> (N, 1, H, W) f32, frozen-decoder readout."""
+    _, _, decoder = model
+    return jax.vmap(decoder)(zb)
+
+
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -90,10 +122,16 @@ def main():
 
     if model_type == "next_vit":
         model = load_next_vit(args.checkpoint_dir, arch_config)
+        init_fn = lambda m, xb: xb
         step_fn = next_vit_step
+        readout_fn = lambda m, state: state
+    elif model_type == "latent_mse":
+        model = load_latent_mse(args.checkpoint_dir, arch_config)
+        init_fn = latent_init
+        step_fn = latent_step
+        readout_fn = latent_readout
     else:
-        raise SystemExit(f"Unknown model_type {model_type!r} — B1 latent "
-                         "rollouts land with train_latent.py.")
+        raise SystemExit(f"Unknown model_type {model_type!r}")
 
     # --- GT initial conditions ---
     with h5py.File(args.data_path, "r") as f:
@@ -118,11 +156,13 @@ def main():
     fields[:, 0] = gt[start_frames]
 
     # --- Closed-loop rollout, all ICs advanced together ---
-    x = jnp.asarray(fields[:, 0][:, None], dtype=jnp.float32)  # (N, 1, H, W)
+    x0 = jnp.asarray(fields[:, 0][:, None], dtype=jnp.float32)  # (N, 1, H, W)
+    state = init_fn(model, x0)
     t_start = time.time()
     for t in range(args.n_steps):
-        x = step_fn(model, x)
-        fields[:, t + 1] = np.asarray(x[:, 0], dtype=np.float32)
+        state = step_fn(model, state)
+        pixels = readout_fn(model, state)
+        fields[:, t + 1] = np.asarray(pixels[:, 0], dtype=np.float32)
         if (t + 1) % args.print_every == 0:
             elapsed = time.time() - t_start
             rate = (t + 1) / elapsed

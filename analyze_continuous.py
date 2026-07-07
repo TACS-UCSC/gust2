@@ -75,27 +75,44 @@ def parse_args():
 
 
 def compute_onestep_predictions(checkpoint_dir, gt, batch_size):
-    """Apply the model once to every GT frame: (M, H, W) -> (M-1, H, W)."""
+    """Apply the model once to every GT frame: (M, H, W) -> (M-1, H, W).
+
+    For latent_mse (B1) "once" means encode -> one latent step -> decode:
+    the same pixel-to-pixel operator whose closed-loop compounding the
+    rollout column shows (there the decode is readout-only).
+    """
     import equinox as eqx
-    from train_next_vit import build_model
 
     with open(os.path.join(checkpoint_dir, "training_state.json")) as f:
         arch_config = json.load(f)["arch_config"]
-    if arch_config.get("model_type", "next_vit") != "next_vit":
+    model_type = arch_config.get("model_type", "next_vit")
+
+    if model_type == "next_vit":
+        from train_next_vit import build_model
+
+        encoder, decoder = build_model(arch_config, jax.random.PRNGKey(0))
+        encoder = eqx.tree_deserialise_leaves(
+            os.path.join(checkpoint_dir, "encoder.eqx"), encoder)
+        decoder = eqx.tree_deserialise_leaves(
+            os.path.join(checkpoint_dir, "decoder.eqx"), decoder)
+        encoder = eqx.nn.inference_mode(encoder)
+        decoder = eqx.nn.inference_mode(decoder)
+
+        @eqx.filter_jit
+        def step(xb):
+            return jax.vmap(lambda s: decoder(encoder(s)))(xb)
+    elif model_type == "latent_mse":
+        from train_latent import load_latent_model
+
+        dynamics, encoder, decoder, _ = load_latent_model(
+            checkpoint_dir, arch_config)
+
+        @eqx.filter_jit
+        def step(xb):
+            return jax.vmap(lambda s: decoder(dynamics(encoder(s))))(xb)
+    else:
         raise SystemExit(f"one-step column: unsupported model_type "
-                         f"{arch_config.get('model_type')!r}")
-
-    encoder, decoder = build_model(arch_config, jax.random.PRNGKey(0))
-    encoder = eqx.tree_deserialise_leaves(
-        os.path.join(checkpoint_dir, "encoder.eqx"), encoder)
-    decoder = eqx.tree_deserialise_leaves(
-        os.path.join(checkpoint_dir, "decoder.eqx"), decoder)
-    encoder = eqx.nn.inference_mode(encoder)
-    decoder = eqx.nn.inference_mode(decoder)
-
-    @eqx.filter_jit
-    def step(xb):
-        return jax.vmap(lambda s: decoder(encoder(s)))(xb)
+                         f"{model_type!r}")
 
     inputs = gt[:-1]                                     # predict frames 1..M-1
     preds = np.zeros_like(inputs)
