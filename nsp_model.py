@@ -84,6 +84,9 @@ def build_rope_coords(scales: tuple, padded_len: int) -> jnp.ndarray:
 
     Returns: (padded_len, 2) float32. Padding positions get (0, 0).
     """
+    if len(scales) == 0:
+        # Single-scale (flat) configs: the truncated t1 is empty.
+        return jnp.zeros((padded_len, 2), dtype=jnp.float32)
     max_h = max(h for h, w in scales)
     max_w = max(w for h, w in scales)
 
