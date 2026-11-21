@@ -768,6 +768,223 @@ def generate_t1_frame(model: NSPModel, exp_heads: ExpansionHeads,
 
 
 # =============================================================================
+# Generation with a per-step key/value cache (exact, inference only)
+# =============================================================================
+#
+# generate_t1_frame re-runs the whole [t0, t1] sequence once per trainable scale.
+# The teacher-forced mask makes that redundant: t0 rows attend to t0 only, and a
+# t1 row at scale j attends to t0 and to t1 scales <= j, never to padding. So the
+# hidden states of a token block (t0, or one t1 scale) do not change once the
+# block's tokens are fixed. The cached path runs each block through the
+# transformer once and keeps its per-layer keys (after QK-norm and RoPE) and
+# values for the later blocks to attend to. Same weights, same masks, same
+# sampler and keys; the outputs differ from generate_t1_frame only by float
+# summation order.
+
+
+def _block_attn_pre(block: NSPBlock, x: jax.Array, coords: jax.Array):
+    """The part of NSPBlock.__call__ before attention, for a subset of rows.
+    Returns q, k (QK-normed, RoPE applied) and v, each (n, n_heads, d_head)."""
+    dtype = x.dtype
+    xn = jax.vmap(block.attn_norm)(x.astype(jnp.float32)).astype(dtype)
+    qkv = jax.vmap(block.qkv_proj)(xn)
+    qkv = qkv.reshape(-1, 3, block.n_heads, block.d_head)
+    q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
+    q = jax.vmap(jax.vmap(block.qk_norm))(q.astype(jnp.float32)).astype(dtype)
+    k = jax.vmap(jax.vmap(block.qk_norm))(k.astype(jnp.float32)).astype(dtype)
+    q, k = _apply_2d_rope_coords(q, k, coords, block.rope_theta)
+    return q.astype(dtype), k.astype(dtype), v.astype(dtype)
+
+
+def _block_attn_post(block: NSPBlock, r: jax.Array, attn_out: jax.Array):
+    """The part of NSPBlock.__call__ after attention (out_proj, residual, FFN)."""
+    dtype = r.dtype
+    d = block.n_heads * block.d_head
+    x = attn_out.reshape(-1, d)
+    x = jax.vmap(block.out_proj)(x)
+    x = r + x
+    r2 = x
+    xn = jax.vmap(block.ffn_norm)(x.astype(jnp.float32)).astype(dtype)
+    x = jax.vmap(block.down_proj)(
+        jax.nn.silu(jax.vmap(block.gate_proj)(xn)) * jax.vmap(block.up_proj)(xn))
+    return r2 + x
+
+
+def _run_token_block(model: NSPModel, tokens: jax.Array, scale_ids: jax.Array,
+                     frame_ids: jax.Array, coords: jax.Array, cache: list):
+    """Run one token block through every layer, attending to `cache` + itself.
+
+    cache: per layer, a list of (k, v) pairs of the blocks this one may attend to.
+    Returns (final hidden states after ln_f, this block's per-layer (k, v))."""
+    x = model.embedding(tokens, scale_ids, frame_ids)
+    new_kv = []
+    for layer, block in enumerate(model.blocks):
+        q, k, v = _block_attn_pre(block, x, coords)
+        prev = cache[layer]
+        k_all = jnp.concatenate([pk for pk, _ in prev] + [k], axis=0)
+        v_all = jnp.concatenate([pv for _, pv in prev] + [v], axis=0)
+        a = jax.nn.dot_product_attention(q, k_all, v_all, implementation='xla')
+        x = _block_attn_post(block, x, a)
+        new_kv.append((k, v))
+    x = jax.vmap(model.ln_f)(x.astype(jnp.float32)).astype(x.dtype)
+    return x, new_kv
+
+
+def generate_t1_frame_cached(model: NSPModel, exp_heads: ExpansionHeads,
+                             config: NSPConfig, t0_tokens: jax.Array,
+                             scales_t0: tuple, padded_len_t0: int,
+                             scales_t1: tuple, padded_len_t1: int,
+                             attn_bias: jax.Array, scale_masks: jax.Array,
+                             trainable_indices: list,
+                             key: jax.Array,
+                             temperature: float = 0.0,
+                             top_k: int = 0,
+                             top_p: float = 1.0,
+                             log_topk: int = 0,
+                             position_mask: jax.Array = None,
+                             sampler_cfg: SamplerConfig = None,
+                             anchor_array: jax.Array = None,
+                             data_prior_table: jax.Array = None,
+                             percell_anchor: jax.Array = None,
+                             return_hidden: bool = False):
+    """generate_t1_frame with each token block run through the transformer once.
+
+    Same arguments and returns as generate_t1_frame (attn_bias is accepted for
+    signature parity and unused: the cache holds exactly the positions the mask
+    allows). return_hidden=True also returns the final hidden states of the real
+    t0 tokens and of each t1 scale that was run, for equivalence tests.
+    """
+    if sampler_cfg is None:
+        sampler_cfg = SamplerConfig(
+            method="ancestral", temperature=temperature,
+            top_k=top_k, top_p=top_p)
+
+    boundaries = config.scale_boundaries
+    tokens_per_frame = config.tokens_per_frame
+
+    boundaries_t0 = [0]
+    for h, w in scales_t0:
+        boundaries_t0.append(boundaries_t0[-1] + h * w)
+    boundaries_t1 = [0]
+    for h, w in scales_t1:
+        boundaries_t1.append(boundaries_t1[-1] + h * w)
+
+    # Per-position inputs, built exactly as forward_teacher_forced builds them,
+    # then sliced per block (t1 coordinates live on the truncated-t1 grid).
+    scale_ids_t0 = get_scale_ids(scales_t0, padded_len_t0)
+    scale_ids_t1 = get_scale_ids(scales_t1, padded_len_t1)
+    coords_t0 = build_rope_coords(scales_t0, padded_len_t0)
+    coords_t1 = build_rope_coords(scales_t1, padded_len_t1)
+
+    first_trainable_pos = boundaries[trainable_indices[0]]
+    t1_tokens = jnp.zeros(tokens_per_frame, dtype=jnp.int32)
+    t1_tokens = t1_tokens.at[:first_trainable_pos].set(
+        t0_tokens[:first_trainable_pos])
+
+    needs_key = not (sampler_cfg.method == "ancestral"
+                     and sampler_cfg.temperature == 0.0)
+    if needs_key:
+        scale_keys = list(jax.random.split(key, len(trainable_indices)))
+    else:
+        scale_keys = [None] * len(trainable_indices)
+
+    if log_topk > 0:
+        top_logits_full = jnp.zeros(
+            (tokens_per_frame, log_topk), dtype=jnp.float32)
+        top_indices_full = jnp.zeros(
+            (tokens_per_frame, log_topk), dtype=jnp.int32)
+
+    # ---- t0: one pass over its real tokens (padding is never attended to) ----
+    n_layer = len(model.blocks)
+    n_t0 = tokens_per_frame
+    h_t0, kv_t0 = _run_token_block(
+        model, t0_tokens[:n_t0], scale_ids_t0[:n_t0],
+        jnp.zeros(n_t0, dtype=jnp.int32), coords_t0[:n_t0],
+        [[] for _ in range(n_layer)])
+    cache = [[kv_t0[layer]] for layer in range(n_layer)]
+
+    h_t1_blocks = {}      # t1 scale index -> final hidden states of that scale
+    done_t1 = -1
+
+    def run_t1_through(j_target, t1_tokens, cache, done_t1):
+        while done_t1 < j_target:
+            j = done_t1 + 1
+            a, b = boundaries_t1[j], boundaries_t1[j + 1]
+            h_j, kv_j = _run_token_block(
+                model, t1_tokens[a:b], scale_ids_t1[a:b],
+                jnp.ones(b - a, dtype=jnp.int32), coords_t1[a:b], cache)
+            cache = [cache[layer] + [kv_j[layer]] for layer in range(n_layer)]
+            h_t1_blocks[j] = h_j
+            done_t1 = j
+        return cache, done_t1
+
+    for i, scale_idx in enumerate(trainable_indices):
+        h_k, w_k = config.scales[scale_idx]
+        n_tokens_k = h_k * w_k
+
+        # Source hidden states from scale k-1
+        if scale_idx == 0:
+            h_src, w_src = config.scales[0]
+            h_source = h_t0[boundaries_t0[0]:boundaries_t0[1], :]
+        else:
+            src_in_t1 = scale_idx - 1
+            cache, done_t1 = run_t1_through(src_in_t1, t1_tokens, cache, done_t1)
+            h_src, w_src = scales_t1[src_in_t1]
+            h_source = h_t1_blocks[src_in_t1]
+
+        # ---- identical to generate_t1_frame from here ----
+        h_source_2d = h_source.reshape(h_src, w_src, config.n_embd)
+        h_up = jax.image.resize(
+            h_source_2d, (h_k, w_k, config.n_embd), method='bilinear')
+
+        rows = jnp.arange(h_k, dtype=jnp.float32) / max(h_k - 1, 1)
+        cols = jnp.arange(w_k, dtype=jnp.float32) / max(w_k - 1, 1)
+        grid_r, grid_c = jnp.meshgrid(rows, cols, indexing='ij')
+        coords = jnp.stack([grid_r, grid_c], axis=-1)
+        pos_emb = jax.vmap(jax.vmap(exp_heads.pos_proj))(coords)
+
+        h_flat = (h_up + pos_emb).reshape(n_tokens_k, config.n_embd)
+        local_coords = _local_cell_coords(h_k, w_k)
+        logits = exp_heads.expand(h_flat, i, local_coords)
+        logits = jnp.where(scale_masks[scale_idx][None, :], logits, -1e9)
+
+        if position_mask is not None:
+            tgt_start_pm = boundaries[scale_idx]
+            tgt_end_pm = boundaries[scale_idx + 1]
+            pm_slice = position_mask[tgt_start_pm:tgt_end_pm, :]
+            logits = jnp.where(pm_slice, logits, -1e9)
+
+        if log_topk > 0:
+            tgt_start = boundaries[scale_idx]
+            top_vals_k, top_idx_k = jax.lax.top_k(logits, log_topk)
+            top_logits_full = jax.lax.dynamic_update_slice(
+                top_logits_full, top_vals_k.astype(jnp.float32),
+                (tgt_start, 0))
+            top_indices_full = jax.lax.dynamic_update_slice(
+                top_indices_full, top_idx_k.astype(jnp.int32),
+                (tgt_start, 0))
+
+        anchor_i = None if anchor_array is None else anchor_array[i]
+        if percell_anchor is not None:
+            anchor_i = percell_anchor[boundaries[scale_idx]:boundaries[scale_idx + 1]]
+        d_block = (None if data_prior_table is None
+                   else data_prior_table[boundaries[scale_idx]:
+                                         boundaries[scale_idx + 1], :])
+        predicted = sample_scale(logits, scale_keys[i], anchor_i, sampler_cfg,
+                                 d_block=d_block)
+
+        tgt_start = boundaries[scale_idx]
+        tgt_end = boundaries[scale_idx + 1]
+        t1_tokens = t1_tokens.at[tgt_start:tgt_end].set(predicted)
+
+    if return_hidden:
+        return t1_tokens, h_t0, h_t1_blocks
+    if log_topk > 0:
+        return t1_tokens, top_logits_full, top_indices_full
+    return t1_tokens
+
+
+# =============================================================================
 # Factory
 # =============================================================================
 

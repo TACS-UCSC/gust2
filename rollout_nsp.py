@@ -30,7 +30,7 @@ import numpy as np
 
 from nsp_model import (
     NSPConfig, NSPModel, ExpansionHeads,
-    create_nsp_model, generate_t1_frame,
+    create_nsp_model, generate_t1_frame, generate_t1_frame_cached,
     build_teacher_forced_mask,
 )
 from samplers import SamplerConfig
@@ -108,6 +108,12 @@ def parse_args():
     parser.add_argument("--top_p", type=float, default=1.0,
                         help="Nucleus (top-p) threshold in (0, 1]; 1.0 "
                              "disables (ignored when temperature == 0).")
+    parser.add_argument("--kv_cache", action="store_true",
+                        help="Run each token block (t0, then each t1 scale) through "
+                             "the transformer once per step and cache its keys/values "
+                             "(nsp_model.generate_t1_frame_cached). Same model, masks, "
+                             "sampler and keys as the default path; outputs differ only "
+                             "by float summation order. Default off.")
     parser.add_argument("--log_topk", type=int, default=0,
                         help="If > 0, also save per-emission top-K raw "
                              "logits + token indices (post scale-mask, "
@@ -609,8 +615,10 @@ def main():
     top_p = args.top_p
     log_topk = args.log_topk
 
+    gen_fn = generate_t1_frame_cached if args.kv_cache else generate_t1_frame
+
     def _generate_one(t0_tokens, key):
-        return generate_t1_frame(
+        return gen_fn(
             model, exp_heads, config, t0_tokens,
             scales_t0, padded_t0, scales_t1, padded_t1,
             attn_bias, scale_masks, trainable_indices,
@@ -836,6 +844,7 @@ def main():
         "n_steps": args.n_steps,
         "start_frame": int(start_frames[0]),
         "log_topk": log_topk,
+        "kv_cache": bool(args.kv_cache),
         "position_mask_used": bool(position_mask_np is not None),
         "emission_mask": emission_mask_mode,
         "sampler": args.sampler,
