@@ -1,183 +1,1070 @@
 % =====================================================================
-%  gust2 — TMLR submission (v2 body, restructured from OUTLINE.md 2026-07-07)
-%  Compile (anonymous submission):   pdflatex main ; bibtex main ; pdflatex main ; pdflatex main
-%  Camera-ready (reveal authors):    \usepackage[accepted]{tmlr}
-%  De-anonymized preprint (arXiv):   \usepackage[preprint]{tmlr}
-%  Style files (tmlr.sty/.bst, fancyhdr.sty, math_commands.tex) are vendored in this dir.
-%
-%  Section structure follows paper/OUTLINE.md (v2). Figure slots are marked
-%  \figslot{...}; each names its outline id and producing script. Numbers in
-%  the prose are from the analysis layer as of 2026-07-07; slots that wait on
-%  queued runs (B1 rollouts, flat-NSP dynamics) are tagged PENDING.
+%  gust2 — TMLR submission (v9 skeleton: script register, 2026-07-21)
+%  REGISTER: every bullet is the NEXT FACT the prose states, in order —
+%  expand each into one to three sentences and move on. Each fact and each
+%  explanation appears once, at first need, and nowhere else. The abstract
+%  is the only sanctioned echo. No \stub lines in the body (the \stub
+%  command survives only for the abstract wrapper).
+%  STRUCTURE (user reorg 07-21 pm, conformed by Claude): intro (carries the
+%  stabilizer descriptions + fig1) → §2 Related work (full survey again —
+%  the story section was cut, so Chronos/toolchain/world-model descriptions
+%  live here) → §3 Methodology (opens with the why-discrete justification;
+%  subsections: The System, tokenizer, NSP — each justified as presented;
+%  the old Tokenization and whydiscrete subsections are dissolved into it)
+%  → §4 calibration → §5 experiments. Section heads are short noun phrases
+%  (user's style); bullets are plain declaratives, no staging language.
+%  Surviving one-home rules: cost passes stated in the NSP subsection,
+%  fig:cost now lives there too (moved 08-04); number homes: M6 flats
+%  sec:method; wininv bound (one line, fig cut 08-26) + 42/45 + band + regret sec:calibmethod;
+%  camouflage scalars sec:greedy; concentration bands sec:baselines.
+%  Abstract + intro ¶s = the user's prose (from the 09:47 buffer overwrite),
+%  installed verbatim; remaining intro facts sit as bullets at their
+%  insertion points. MERGE NOTE (07-21 pm): a stale VSCode buffer
+%  (v7.7-base) overwrote v9 on disk; this file = v9 base + the user's
+%  abstract/intro prose transplanted in. Both parents preserved:
+%  _archive/main_user_overwrite_v7.7base_2026-07-21.tex and
+%  _archive/main_v9_script_register_2026-07-21.tex.
+%  Decision ledgers kept inline: CITE-RESOLVED / do-not-revive / SPLIT (resolved 08-03:
+%  clean-window rerun, no changes).
+%  History: _archive/main_v7.9_coverage_recut_2026-07-21.tex (+ v7.8 with
+%  the v7.5-v7.8 change log in its header); Claude's rejected prose draft
+%  at _archive/main_v8_claude_prose_2026-07-20.tex.
+%  MERGE NOTE (08-25 pm): the user's prose edits (made on the pre-per-scale-cut
+%  base) merged onto the cut version; the remaining itemizes and the captions were
+%  then converted to prose in the user's register. Parents:
+%  _archive/main_pre_prose_merge_2026-08-25.tex (the cut version) and
+%  _archive/main_user_prose_edits_2026-08-25.tex (the user's edited copy).
+%  Compile: pdflatex main ; bibtex main ; pdflatex main ; pdflatex main
 % =====================================================================
 \documentclass{article}
-\usepackage{tmlr}                 % anonymous double-blind submission by default
-% \usepackage[accepted]{tmlr}     % <- swap in for the camera-ready
-% \usepackage[preprint]{tmlr}     % <- swap in for a de-anonymized preprint
+\usepackage[preprint]{tmlr}       % ADVISOR DRAFT: shows authors. Revert to \usepackage{tmlr} (anonymous) for submission.
+% \usepackage[accepted]{tmlr}     % <- camera-ready
+% \usepackage[preprint]{tmlr}     % <- de-anonymized preprint
 
 \usepackage{booktabs}
+\usepackage{float}   % [H] still used in the appendix; body figures float as [t]
+\usepackage{placeins}  % \FloatBarrier available; automatic per-section barriers cut pages short
+% Relaxed float fractions: the body's full-width figures are tall, and the defaults
+% would push them onto float-only pages, leaving dead half-empty text pages.
+\renewcommand{\topfraction}{0.85}
+\renewcommand{\bottomfraction}{0.7}
+\renewcommand{\textfraction}{0.1}
+\renewcommand{\floatpagefraction}{0.75}
+\setcounter{topnumber}{3}
+\setcounter{totalnumber}{4}
 \usepackage{graphicx}
 \usepackage{amsmath,amssymb}
 \usepackage{subcaption}
 \usepackage{xcolor}
+\usepackage{enumitem}
+\setlist[itemize]{leftmargin=1.4em,itemsep=2pt,topsep=3pt}
 \input{math_commands.tex}
 
-\graphicspath{{../plots/}{../artifacts/}{figures/}}
+% Self-contained for Overleaf: figures live in figures/ (synced from ../plots by
+% scripts/local/sync_paper_figures.sh — re-run it after regenerating any plot).
+\graphicspath{{figures/}}
 
-% Placeholder box for figures not yet composed. Args: {outline id / source}{caption-level description}
+% Placeholder box for figures not yet composed. Args: {status}{caption-level description}
 \newcommand{\figslot}[2]{%
   \begin{center}
   \fbox{\parbox{0.92\linewidth}{\small\textbf{[FIGURE SLOT — #1]}\\ #2}}
   \end{center}}
 
-\title{Structurally Stable Turbulence Rollouts via Discrete Next-Scale Prediction}
+% Section-stub line: the claim this section will argue, in one or two sentences.
+\newcommand{\stub}[1]{\noindent{\color{gray!55!black}\itshape [stub] #1}\par\medskip}
 
-\author{\name Anonymous \email anon@example.com \\
-        \addr Anonymous Institution}
+\title{Long-Horizon Turbulence Rollouts via Discrete Next-Scale Prediction}
+
+\author{\name Anish Sambamurthy \email asambamu@ucsc.edu \\
+        \addr Department of Applied Mathematics, University of California, Santa Cruz
+        \AND
+        \name Ashesh Chattopadhyay \email aschatto@ucsc.edu \\
+        \addr Department of Applied Mathematics, University of California, Santa Cruz
+        \AND
+        \name Daniele Venturi \email venturi@ucsc.edu \\
+        \addr Department of Applied Mathematics, University of California, Santa Cruz}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-Autoregressive surrogates for chaotic dynamics are judged at the wrong horizon. Past the Lyapunov time
-every trajectory decorrelates from the truth, so the useful question is statistical: does a 2{,}000-step
-rollout stay on the attractor? We study this question for two-dimensional turbulence with a surrogate
-that quantizes the vorticity field into a multi-scale discrete latent (VAR-style residual vector
-quantization), autoregresses entirely in token space, and decodes only at readout. Discreteness converts
-gradual spectral drift into countable failures, and we organize the paper around the three layers of
-defense this enables: a finite vocabulary, a per-token support mask, and a sampling temperature read
-directly from training-set climate statistics rather than swept. The calibration layer is the
-centerpiece: a per-scale entropy-matching rule predicts a safe temperature inside the empirical
-on-manifold band in 42 of 45 (model, tokenizer) cells, and a fine-scale heating schedule chosen once
-transfers across a 15-cell grid, beating or matching the swept optimum in 14. Controlled ablations
-correct two claims we would otherwise have overclaimed: the support mask must be per-token because a
-per-scale mask leaves position-level violations untouched, and multi-scale structure buys an interface
-for prediction and calibration, not reconstruction efficiency.
+Science and engineering rely on time-dependent partial differential equations
+as a major part of their modeling toolkits. Due to their flexibility and potentially
+lower computational cost compared to traditional numerics, neural surrogates have
+become an increasingly popular tool. Despite these advantages, the autoregressive
+framework the surrogates rely on has difficulty maintaining stable long-horizon
+predictions. Rollouts with short-horizon accuracy can blur or explode over thousands of
+steps, destroying the accuracy of long-run statistics, which are typically the primary object of 
+interest. We present a framework for stable long-horizon autoregressive
+rollouts with three components: a multi-scale tokenizer that converts physical fields into
+sequences of discrete tokens, a prefix-LM-style next-scale-prediction transformer,
+and a method to calibrate sampling temperature. Using a few short rollouts, we are able to calibrate our sampling to match the training data's token entropy at the finest scales. We test our method
+on 2D turbulence across 45 model and tokenizer configurations, and compare our 
+calibration method against a temperature sweep of 128 trajectories at 2{,}000 
+steps per temperature. Rollouts at the calibrated temperature remain stable on 42 of the 45 model configurations.
+This calibration is significantly cheaper than a naive sweep, going from 1{,}250 to 8{,}000 undecoded frames per
+configuration against the sweep's 1.28M decoded frames at a median cost of 0.19 earth mover's distance (EMD) over
+the swept optimum. We also show that our calibrated discrete trajectory's long-run statistics concentrate
+with window length, while pushforward-stabilized continuous baselines' do not.
+
+
 \end{abstract}
 
 % =====================================================================
 \section{Introduction}
 \label{sec:intro}
 
-A neural surrogate for a chaotic flow cannot be graded on trajectory error for long. Two-dimensional
-turbulence decorrelates from any reference trajectory within a few eddy-turnover times, after which
-pointwise RMSE measures the weather and not the model. The bar that matters for long-horizon use is
-statistical: after thousands of autoregressive steps, the rollout should still have the right energy
-spectrum, the right vorticity distribution, and the visual texture of turbulence. Continuous
-autoregressive surrogates fail this bar in a characteristic way. Each step applies a spectrally biased
-operator to its own output, small-scale energy drains or accumulates, and the fixes in the literature
-are numerical margins tuned per system: injected training noise \citep{stachenfeld2022learned},
-pushforward regularization \citep{brandstetter2022mppde}, or learned spectral refinement steps
-\citep{lippe2023pderefiner}.
+Neural surrogates for time-dependent PDEs are fast because they can compress many small, stability-limited solver stages
+into a single learned step. In an autoregressive framework, that step is reapplied to its own output, enabling generation of
+arbitrary-length trajectories from a single initial condition. As in traditional numerics, this process
+accumulates error over long rollouts. This creates issues, as most systems of interest are chaotic. 2D turbulence,
+for instance, decorrelates within a few eddy turnovers. Because of this, the accuracy metrics for long-term trajectories look
+at long-run statistics such as the average kinetic energy spectrum and vorticity distribution rather than root mean-squared error.
 
-We take a different bet, borrowed from time-series forecasting \citep{ansari2024chronos}: discretize
-the state and inherit the autoregressive toolbox of language modeling. The field is quantized by a
-multi-scale residual VQ tokenizer \citep{oord2017neural,tian2024var} into a few hundred discrete tokens
-per frame, dynamics are learned as next-scale prediction in token space, and the decoder runs once per
-readout. A discrete state space cannot blur. Every emitted token is a codebook entry, so the failure
-modes of a discrete rollout are not gradual grey-out but discrete, countable events, and each layer of
-the method exists because counting exposed the failure of the previous one:
+Unlike traditional numerics, neural surrogates have no convergence guarantees, and this combined with error accumulation means that neural
+surrogates will eventually encounter an input out of the distribution of their training data. These off-distribution inputs can cause catastrophic
+instabilities in long-term rollouts, and a great deal of effort has been spent in the literature to attempt to stabilize these models. An underlying
+cause for this instability is the nature of the prediction task itself. The neural networks are trained as regression problems and attempt to directly
+predict the continuous values of a target vector or distribution. Stabilizing these outputs for accurate long-term rollouts is a challenge due to the
+unbounded nature of the input and output fields: a continuous variable can always drift to a value not seen during training.
+Figure~\ref{fig:offmanifold} shows this failure on 2D turbulence: a continuous surrogate
+whose one-step predictions are nearly exact accumulates broadband error and leaves the data
+manifold within a few hundred steps.
 
-\begin{enumerate}
-\item \textbf{Vocabulary (structural).} The finite codebook makes smooth regression toward the mean
-unrepresentable. It is not sufficient: unconstrained sampling emits tokens off the data support and
-the rollout explodes into static (mode A, Section~\ref{sec:modes}).
-\item \textbf{Per-token support mask (marginal).} Restricting each emission to the tokens observed at
-that exact position in training data bounds the marginal support and eliminates mode A. It is still
-not sufficient: a masked but cold-sampled rollout collapses diffusively while remaining entirely
-in-support (mode B).
-\item \textbf{Sampling calibration as a data-read (joint).} The temperature that keeps the rollout on
-the attractor is not swept; it is computed from the training set's per-scale token entropy, which a
-window-invariance property makes a legitimate stand-in for the climate target
-(Section~\ref{sec:calibration}).
-\end{enumerate}
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\linewidth]{headline/fig1_offmanifold_rows}
+\caption{The long rollout problem. Each row shows a model rollout across time. The continuous ViT baseline model tracks ground truth well but becomes visibly unstable by step 250. The calibrated discrete rollout loses the trajectory but holds the statistical properties until the end of the timeline.}
+\label{fig:offmanifold}
+\end{figure}
 
-None of these interventions is tuned to a model. The mask is derived from tokenizer support, the
-substitution-noise rate is fixed at 0.10 for every run in the paper, and the temperature is a property
-of the data. We phrase the headline claim accordingly: no per-model calibration, with the interventions
-untuned rather than absent.
+The standard fixes in the literature involve adding different types of stabilizing margins to the network: noise injected into the
+training inputs so the model learns to damp the perturbations its own errors will supply \citep{stachenfeld2022learned}; training unrolled through the 
+model's own predictions so it optimizes against its own drift, the ``pushforward'' trick \citep{brandstetter2022mppde}; a learned per-step refinement 
+that re-amplifies the high-frequency content each step loses \citep{lippe2023pderefiner}; score-based steering of each step back toward the data distribution
+\citep{thermalizer2025}. Each of these fixes involves a training-time hyperparameter, and the only way to learn whether or not it is properly tuned is to run the long rollout and score it against ground truth.
 
-Our claims, with the section that carries each:
-\textbf{M1} (Sections~\ref{sec:mask}--\ref{sec:calibration}): the full stack yields 2{,}000-step
-statistically stable rollouts across a 45-cell grid of model and tokenizer sizes with no task-specific
-tuning.
-\textbf{M2} (Section~\ref{sec:modes}): discrete rollouts fail in two distinct modes with opposite
-logit signatures, both detectable online from token statistics alone.
-\textbf{M3} (Section~\ref{sec:mask}): the support constraint must be per-token; a per-scale constraint
-leaves position-level violations at the no-mask rate.
-\textbf{M4} (Section~\ref{sec:calibration}): the safe sampling basin is predictable a priori from
-training-data statistics, and a schedule chosen once transfers across configurations.
-\textbf{M5} (Section~\ref{sec:continuous}): the spectral cost of the representation is paid once at
-tokenization rather than compounded per step, unlike pixel- or latent-space continuous AR.
-\textbf{M6} (Section~\ref{sec:whyscales}): multi-scale structure is an interface, not a compression
-win; matched-budget flat tokenizers reach the same reconstruction floor.
+The nature of autoregressive instability motivates a shift from regression to classification. If the problem is converted to one of predicting discrete classes, then the
+set of outputs (and therefore inputs) is finite and bounded. It is not possible for a classifier to predict a class not in the training data. The challenge is then to find
+a way to convert a continuous regression problem into one of classification, which guides our approach.
 
-\figslot{F1 — teaser montage (compose; mode-A row from rollouts-sampling pull)}{One row per outcome at
-$t\in\{10,100,1000,2000\}$: ground truth; mode-A static explosion (no mask); mode-B diffusive banding
-(mask, cold); a-priori-calibrated stable rollout (mask + data-read $T$). One-line annotation per row.}
+Our first contribution is the discretized surrogate model: a multi-scale VQ tokenizer and a next-scale-prediction transformer (Section~\ref{sec:method}).
+We show that the conversion to discrete tokens does not by itself make the rollout stable; it introduces two different failure modes, and the choice of sampling method controls which one occurs.
+Sampling with low entropy (greedy or low temperature) causes the solution to collapse to smooth banded modes. Conversely, sampling with too much entropy (high temperature) 
+produces accurate kinetic energy profiles but distorts the vorticity distribution (Section~\ref{sec:greedy}). This has shifted the problem of hyperparameter tuning from training time to test time, 
+and the naive method for choosing an optimal temperature is no different from prior architectures: run long rollouts at different temperatures and score them against the ground truth.
+
+This motivates our next contribution: a calibration method that is substantially cheaper than generating many long rollouts and scoring them against ground truth. We develop 
+a marginal-entropy calibration that uses training data and short rollouts without ground truth to find the stabilizing sampling temperature needed for long-term rollouts 
+(Section~\ref{sec:calibration}). Finally, we compare our results to existing baselines and show that the calibrated discrete rollout's long-run statistics concentrate with window length while
+a pushforward-stabilized continuous baseline's do not (Section~\ref{sec:baselines}).
+
 
 % =====================================================================
-\section{Problem setup, data, and evaluation protocol}
-\label{sec:setup}
+\section{Related work}
+\label{sec:related}
 
-We work with two-dimensional forced turbulence: vorticity fields $\omega(x,y,t)$ on a
-$256\times256$ periodic grid, 20{,}000 consecutive frames for training and the following 2{,}000 for
-validation and rollout initial conditions. % TODO verify exact frame counts against dataset card
-Rollouts continue past the end of the training window, so a model that memorized frame-to-frame lookups
-has nothing to look up; statistical fidelity beyond the data boundary is the object of study.
 
-Because no single scalar adjudicates long-rollout quality, we commit to a metric hierarchy up front, in
-order of evidential weight: (i) time-averaged TKE and enstrophy spectra against the ground-truth
-climate; (ii) two discrete-native alarms, the per-position out-of-support emission rate and the
-per-scale token-distribution drift (total variation, Jensen--Shannon divergence, and signed entropy
-drift $\Delta H_k$); (iii) snapshots; (iv) the Wasserstein-1 distance between pixel distributions
-(EMD), used as a fidelity summary only. The ordering is load-bearing: we exhibit rollouts in
-Section~\ref{sec:mask} whose EMD is indistinguishable from healthy ones while the token-level alarms
-fire, and continuous baselines in Section~\ref{sec:continuous} whose scalar spectral error flatters
-them. No claim in this paper is adjudicated by EMD alone.
+Neural surrogates for PDEs are most commonly trained as autoregressive regression models
+over continuous fields, from convolutional models to spectral operator families
+\citep{kochkov2021machine,li2021fourier}. The stabilizing margins developed for these
+models are described in the introduction. Work closest to ours extends this paradigm with multi-physics pretraining of autoregressive surrogates
+\citep{mccabe2024mpp} and autoregression over continuous latent codes
+\citep{serrano2024aroma}. In all of these, the correction is chosen per system and applied
+at every rollout step, and the margin a new system needs is discovered only by rolling it
+out.
 
-\figslot{F2.1 — metric-hierarchy composite (recompose from v1 fig2a/fig5a/fig2/fig2b)}{Four panels in
-hierarchy order: spectra battery; OOD-rate trace; snapshot strip; pixel PDF.}
+Time series forecasting has also discretized the value axis, gaining access to the
+language-model toolbox: a fixed vocabulary, cross-entropy training, and mature sampling
+machinery. Digit tokenization puts scalar series directly into a frozen LLM
+\citep{gruver2023llmtime}, Chronos builds a quantized value vocabulary and trains on it
+\citep{ansari2024chronos}, and TOTEM learns VQ token embeddings \citep{talukder2024totem}.
+These models are judged on forecast skill over scalar series; spatial fields and the
+statistics of long free-running generation are outside their scope.
+
+The tools for tokenizing spatial fields come from image generation. VQ-VAE and VQGAN turn
+images into sequences of tokens drawn from a learned codebook
+\citep{oord2017neural,esser2021taming}, RQ-VAE stacks residual codes under an
+autoregressive transformer \citep{lee2022rqvae}, and VAR moves the autoregressive axis
+from raster order to a coarse-to-fine sequence of scales \citep{tian2024var}. We adopt
+VAR's scale interface for our tokenizer (Section~\ref{sec:method}). These generators are
+judged on the perceptual quality of single samples, and there is no notion of the
+stationary statistics of a generated series.
+
+Closest to this work is a small literature on PDE tokenization: in-context and
+foundation-model prediction over discrete PDE tokens \citep{serrano2024zebra,
+nguyen2025physix}, and VQ compression of turbulence fields \citep{momenifar2021dimension}.
+None of these study stability over multi-thousand-step rollouts, and none calibrate the
+sampling distribution.
 
 % =====================================================================
-\section{Method: multi-scale discrete tokenizer and next-scale prediction}
+\section{The System}
+\label{sec:contlineage}
+\label{sec:contchallenge}
+\label{sec:system}
+
+Our system of choice is 2D forced turbulence on a $\beta$-plane at $Re = 10{,}000$, evolved in
+vorticity form on a doubly periodic $[0, 2\pi]^2$ domain:
+      \[
+      \frac{\partial \omega}{\partial t} + \mathbf{u} \cdot \nabla \omega + \beta v
+        = \frac{1}{Re} \nabla^2 \omega - \alpha\,\omega + F(x, y),
+      \qquad
+      \omega = \nabla^2 \psi, \quad \mathbf{u} = (-\partial_y \psi,\, \partial_x \psi),
+      \]
+      with Coriolis parameter $\beta = 20$, Rayleigh drag $\alpha = 0.1$ removing energy at
+      the largest scales, and stationary forcing $F = 4(\cos 4x + \cos 4y)$ injecting it at
+      wavenumber 4 on both axes.
+ We generate our data with a pseudo-spectral solver at $256^2$ with $3/2$-rule dealiasing,
+ second-order Adams--Bashforth convection with Crank--Nicolson (implicit) diffusion and drag, at $\Delta t_{\mathrm{solver}} = 10^{-4}$, initialized from a spun-up
+ turbulent state so the record is statistically steady throughout. 
+      
+Each data frame is a vorticity snapshot saved every 100 solver steps ($\Delta t = 0.01$ time units), normalized to zero mean and unit variance. One step
+of the surrogate spans what 100 solver steps produce. The training record is ${\sim}20$k consecutive frames (200 time units), with the following 2{,}000 reserved for validation
+and rollout initial conditions.
+
+
+Rollouts are evaluated on the long-run TKE spectrum, computed from the rollout's vorticity frames using the following procedure: invert each frame's vorticity for the streamfunction
+($\hat{\psi} = \hat{\omega}/|k|^2$), form the velocities
+($\hat{u} = i k_y \hat{\psi}$, $\hat{v} = -i k_x \hat{\psi}$), take the
+kinetic-energy spectral density $\tfrac{1}{2}(|\hat{u}|^2 + |\hat{v}|^2)$, average it
+over annular shells in $|k|$ (128 linear bins) to get $E(k)$, and average $E(k)$
+over every frame of the rollout. The enstrophy spectrum
+$Z(k) = \tfrac{1}{2}|\hat{\omega}|^2$ uses the same shells. The reference for both is the
+same time average over the held-out data window.
+
+
+Alongside the spectra we report the pixel vorticity distribution (as an earth mover's
+distance, EMD, against the data's), decoded snapshots, and token-space drift;
+Section~\ref{sec:metrics} explains why no single one of these is sufficient to diagnose rollout instability. Forecast
+skill and long-run statistical fidelity are different objectives with different
+optima on this system (Appendix~\ref{app:secondary}).
+Figure~\ref{fig:offmanifold} shows the failure this paper addresses, on this system:
+the same ViT autoencoder our tokenizer uses, wired instead as a continuous next-frame
+regressor and rolled for 2{,}000 steps, leaves the manifold within a few hundred
+steps even though its one-step spectrum is essentially exact. The stabilized variants
+and the quantitative comparison are in Section~\ref{sec:baselines}.
+
+
+% =====================================================================
+\section{Methodology}
 \label{sec:method}
+\label{sec:discreteroute}
+\label{sec:whydiscrete}
 
-\subsection{Tokenizer}
+% SCRIPT REGISTER. Recut 07-21 (user): the Tokenization subsection and "Why discrete, why
+% a scale axis" are dissolved into this section — the method is justified as it is
+% presented. Opening block = why discrete and why learned; the scale-axis case (cost +
+% instrument + M6) closes the NSP subsection. Architecture is inherited (VAR) and kept
+% brief; details in Appendices~\ref{app:tokenizer} and \ref{app:mask}. The mask stays a
+% design-choice line in the NSP subsection; M3 is not a claim of the paper. The old
+% sec:discreteroute/sec:whydiscrete labels are carried on this section so existing
+% references resolve.
+
+The naive discretization strategy used by Chronos works well in 1D systems, but PDEs are often extremely high-dimensional.
+This high dimensionality makes direct value binning of each point in a single timestep nonviable. For our dataset, one token
+per grid cell gives 65{,}536 tokens per frame at $256^2$. This would explode to 16{,}777{,}216 at $256^3$, so we must learn a
+compressed discretization. Rather than specify one, we turn to the image generation literature and borrow its techniques to learn one.
+A learned discretization has the benefit of bounding the state by construction: every token sequence decodes to a field in the decoder's range,
+making value blow-up impossible.
+
+Beyond boundedness, tokens offer other advantages. The training data's token statistics form a reference distribution (Section~\ref{sec:calibmethod}).
+Failures therefore become measurable events during a rollout: an emitted token the training set never placed at that position, or an emitted token
+distribution measurably narrower than the data's (Section~\ref{sec:greedy}). Additionally, a well-calibrated rollout's long-run statistics will
+concentrate with window length (Section~\ref{sec:baselines}).
+
+It is worth emphasizing that despite being bounded, tokenization by itself stabilizes nothing. While the solution will stay bounded, the long-run statistics
+can still diverge despite every emitted token being legal at its position (Section~\ref{sec:greedy}). Stability instead comes from the sampling distribution.
+
+\subsection{Multi-scale tokenizer}
 \label{sec:tokenizer}
 
-The tokenizer is a ViT autoencoder with a strided-convolution stem that maps $(1,256,256)$ to a
-$(512,32,32)$ latent, quantized by VAR-style multi-scale residual vector quantization
-\citep{tian2024var} against a single shared codebook ($K=4096$, $d=512$, EMA-updated). The latent is
-quantized at successively finer grids ($1{\times}1$ up to $32{\times}32$); each scale quantizes the
-residual left by the coarser ones. We use deterministic argmax quantization. This is a choice, not an
-inevitability: it removes a sampling knob from the tokenizer at a known cost in the high-$k$ tail,
-which is the once-paid spectral bias that Section~\ref{sec:continuous} accounts for. Three token
-budgets appear throughout, named by tokens per frame: sc341 (scales $1..16$), sc917 (adds $24$), and
-sc1941 (adds $32$).
+We adopt VAR's scale interface for the learned discretization. A ViT autoencoder with a
+strided-conv stem maps the $(1,256,256)$ vorticity field to a $(512,32,32)$ latent, and a
+multi-scale residual VQ quantizes that latent against a single shared EMA codebook
+($K{=}4096$, $d{=}512$): quantize at $1{\times}1$, upsample, quantize the residual, and
+repeat up to $32{\times}32$ (Figure~\ref{fig:arch}). The codebook holds a $256^2$ frame in
+341--1{,}941 tokens, a compression rate of $34$--$192{\times}$ in 2D. We name tokenizers by
+their token budget per frame: sc341, sc917, and sc1941.
 
-\figslot{F3.1 — architecture schematic pair (HAVE: vqvae\_arch + multiscale\_vq)}{ViT-AE encoder/decoder
-with the multi-scale residual VQ loop and shared codebook.}
+Quantization is a deterministic argmax over the codebook, which removes a sampling knob
+from the tokenizer at a cost to high-wavenumber performance; Figure~\ref{fig:reconrow}
+shows the loss in accuracy. Because the learned tokens encode local flow patterns rather
+than value bins, per-scale token statistics correspond to physical properties of the
+field, and because tokens decode through a fixed deterministic map, any token statistic
+converts to a field statistic through a single pushforward.
 
-\subsection{Why scales: interface, not compression (M6)}
-\label{sec:whyscales}
+The scale structure itself does not improve reconstruction: flat single-scale control
+tokenizers at matched budget reach the same reconstruction floor (flat-1024 reaches EMD
+0.108 against sc917's 0.107, Table~\ref{tab:reconfloor}), so reconstruction quality is set
+by token count. The case for the scale axis is made at the end of Section~\ref{sec:nsp}. We
+take the error from the tokenizer as a fixed cost, referred to as the model's floor, and 
+all discrete rollout spectra are compared against it.
 
-The reconstruction floor drops steeply with token budget: validation-window reconstruction EMD is
-0.400 for sc341, 0.107 for sc917, and 0.085 for sc1941 at fixed (Small) autoencoder size. We
-originally read this as multi-scale efficiency. A controlled comparison says otherwise. We trained
-single-scale (flat) tokenizers at $16{\times}16$, $24{\times}24$, and $32{\times}32$ with the identical
-recipe and evaluated both families through one code path. At matched token budget the flat tokenizer
-ties or beats the multi-scale one on every reconstruction metric: flat-1024 reaches EMD 0.108 against
-sc917's 0.107 with TKE spectral error 0.62 against 0.64, and flat-256 reaches 0.217 against sc341's
-0.400 with fewer tokens. Reconstruction snapshots are visually indistinguishable. Token count, not
-scale structure, is the reconstruction lever; at low budgets the residual hierarchy is overhead.
 
-\begin{table}[t]
+\begin{figure}[!htb]
 \centering
-\caption{Validation-window reconstruction floors, flat vs multi-scale tokenizers at fixed Small
-autoencoder size, one evaluation code path. Multi-scale carries no reconstruction advantage at matched
-token budget; the high-$k$ third of the spectrum is nearly annihilated by every tokenizer, and mid-$k$
-retention tracks token count. (Producing script: \texttt{eval\_recon\_floor.py}.)}
+\includegraphics[width=0.82\linewidth]{vqvae_arch}\\[6pt]
+\includegraphics[width=0.82\linewidth]{multiscale_vq}
+\caption{The tokenizer. The ViT autoencoder (top) and the multi-scale residual VQ loop with
+the shared codebook (bottom).}
+\label{fig:arch}
+\end{figure}
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\linewidth]{recon_floor/arch_recon_row}
+\caption{Ground truth and its
+reconstruction through each tokenizer with average EMD floor.}
+\label{fig:reconrow}
+\end{figure}
+
+\subsection{Next-scale prediction model}
+\label{sec:nsp}
+
+The dynamics model is a VAR-style transformer (RMSNorm, QK-norm, bias-free projections,
+SwiGLU, 2D axial RoPE on cell-center coordinates) that predicts scale $k$ of frame $t{+}1$
+from scale $k{-}1$'s hidden states through a shared refinement stack. Attention follows a
+prefix-LM pattern: full attention toward the conditioning frame, block-causal within the
+target (Figure~\ref{fig:nsp}).
+% This is the abstract's "prefix-LM-style" claim.
+Emitting an entire scale each forward pass significantly reduces the cost of long
+rollouts. Raster-order autoregression emits one token per sequential pass, so 1024 tokens per frame
+means ${\sim}2.05$M sequential passes for a 2{,}000-step rollout; next-scale prediction
+takes ${\sim}12$k passes for sc917 (one per scale; 10--14k across the three families),
+within ${\sim}6{\times}$ of the $2$k passes of flat one-shot or continuous per-frame
+prediction (one per frame). The passes differ in width: a raster pass emits one token, an
+NSP pass a whole scale.
+% fig:cost CUT 08-25 (user: a bar chart of three numbers). The numbers live in the
+% sentence above; the sec:baselines cost paragraph back-references sec:nsp.
+Training minimizes per-scale cross-entropy weighted by $1/\log(n_k{+}1)$, and
+teacher-forced inputs receive 10\% token-substitution noise, a discrete analogue of
+pushforward-style input perturbation \citep{brandstetter2022mppde,stachenfeld2022learned}.
+At rollout time each emission is masked to the tokens the training set has at
+that exact position. A per-scale variant, which allowed any valid token within the entire scale, led to token combinations never seen by the decoder, which can decode to high-frequency static, so we mask per position. Rollout outcomes are set by the sampling distribution
+(Section~\ref{sec:greedy}); the granularity ablation is in Appendix~\ref{app:mask}.
+
+Our addition of scales is primarily motivated by sampling calibration. A single-scale flat-1024 token model can hold a 2{,}000-step rollout. When we swept across temperatures, we found that at $T{=}1.6$ both flat NSP models run the full horizon essentially at their tokenizer floor (EMD 0.115/0.126 against
+0.108). They still fail cold and hot in the same ways our multi-scale approach does
+(Appendix~\ref{app:secondary}, Figure~\ref{fig:flatnsp}), and the scale decomposition enables additional diagnostic instruments: a per-scale token readout that provides a stabilization
+method. Because entropy drains fastest at the fine scales (Section~\ref{sec:greedy}), the
+per-scale entropy profile is a calibration target. Instead of sweeping the temperature
+with expensive rollouts, we can solve for it from the entropy of the finest scales (Section~\ref{sec:calibration},
+Figure~\ref{fig:schedule}). Coarse scales also cost almost nothing in the residual stack,
+whereas refining a flat tokenizer means growing its single grid quadratically.
+Tokenization has so far provided detection and a diagnostic axis but no stability without an expensive temperature sweep across rollouts; the
+next section develops the calibration enabling that.
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=0.82\linewidth]{nsp_arch}\\[6pt]
+\includegraphics[width=0.7\linewidth]{attention_mask}
+\caption{The NSP model. The backbone with expansion heads and shared refinement (top) and the
+asymmetric [full $t_0$, truncated $t_1$] attention mask (bottom).}
+\label{fig:nsp}
+\end{figure}
+
+% =====================================================================
+\section{Marginal-entropy calibration}
+\label{sec:calibration}
+
+\subsection{The discrete failure modes}
+\label{sec:greedy}
+
+Unlike the continuous baseline of Figure~\ref{fig:offmanifold}, discrete rollouts can fail without any overt signal. Greedy decoding, the natural default for a discrete surrogate,
+can lose fine structure within ${\sim}100$ steps for large-token-count architectures and settle into smooth large-scale banding
+while the tokenizer reconstruction at the same lead time remains indistinguishable from
+ground truth (Figure~\ref{fig:failuremodes}, center).
+
+Raising the temperature fails in the opposite direction. Heating the fine scales to $T{=}4.0$ turns the field fuzzy, 
+but it returns the spectrum exactly to the tokenizer-reconstruction curve and improves every scalar metric over the
+collapsed arm: TKE error $0.60$ against $0.88$ and EMD $0.45$ against $0.79$, from a
+\emph{smaller} model (Figure~\ref{fig:failuremodes}, right). Only examining the pixel distribution
+and the field itself reveals the failure (Section~\ref{sec:metrics}).
+
+Greedy decoding is a $T{\to}0$ limit, cold
+finite sampling at $T{=}0.7$ collapses the same way, and Figure~\ref{fig:failuremodes}
+shows what these failure modes look like. A calibration method must therefore
+determine what to set the temperature to and against what reference. 
+
+The per-scale token readout of Section~\ref{sec:method} shows that the emitted tokens exhibit entropy draining at every scale
+and fastest at the fine ones (Figure~
+ef{fig:modeb}), while every token stays individually legal: the joint
+distribution has drifted to the smoothest corner of the support. We use the
+training data's per-scale token entropy as a reference line for both the diagnosis of failed rollouts and the target for successful ones. The goal of a calibrated sampler is to emit at the data's entropy level on the finest scales, where the drain is fastest. A flat tokenizer or a continuous field has no analogous readout.
+
+The calibration must target a horizon statistic because
+$H(X_k) = H(X_k \mid \mathrm{past}) + I(X_k;\mathrm{past})$. At coarse scales the
+conditional term is near zero, so the long-run diversity lives in the temporal
+term, which no single-step statistic can measure. The collapse consists of the rollout's
+marginal falling below the data's while every conditional stays accurate. Only the
+emitted-token marginal aggregated over a free-running horizon can capture this.
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\linewidth]{mode_diagnostics/failure_modes_pair}
+\caption{Top, left to right: ground truth at $t{=}1500$; greedy
+decoding collapsed into smooth banding (139M NSP); fine scales over-heated at
+$T{=}4.0$ turned fuzzy (113M NSP). Bottom: time-averaged TKE spectra and pixel distributions
+over the full 2{,}000-step rollouts ($N{=}1$ and $N{=}128$ trajectories respectively). 
+Scalar measures incorrectly rate the over-heated arm the highest, while its error can be clearly seen in the distribution.}
+\label{fig:failuremodes}
+\end{figure}
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=0.95\linewidth]{mode_diagnostics/mode_b_entropy_cliff}
+\caption{Comparison of collapsed trajectories versus ground truth in token space.
+Emitted-token entropy per window (sc917, 16 trajectories) against the entropy of the ground-truth tokens at the same positions. Cold sampling drains entropy at every scale, fastest at the finest; warm sampling stays at the data's entropy for 2{,}000 steps, but only at the finest scale. 
+}
+\label{fig:modeb}
+\end{figure}
+
+\subsection{Calibration method}
+\label{sec:calibmethod}
+
+Both failure modes of Section~\ref{sec:greedy} are entropy imbalances. Sampling too hot
+injects entropy the system does not have, and sampling too cold drains entropy it does.
+We looked to answer whether the sampler can be calibrated to the data's entropy
+without an expensive sweep over sampling hyperparameters. Because the statistics of our system are stationary in expectation, the data's token entropy is a fixed target that any model can be matched to. The goal of our calibration is to find a sampling
+method that keeps rollouts out of both failure modes over the whole horizon, which is not necessarily the rollout with the lowest EMD or TKE spectral error.
+
+Section~\ref{sec:greedy} already found the statistic to match, the emitted-token marginal aggregated over a free-running horizon. Stationarity also removes the problem of finding the window length. Because the windowed statistic converges as the window grows, window size is
+not a hyperparameter (this was measured as train-vs-val excess JS
+$\leq 1.5{\times}10^{-2}$ bits across all nine tokenizers). The
+teacher-forced single-step alternative is compared below.
+
+The calibration has three steps. Step (1) computes the target: the per-scale marginal
+token entropy $H^{\mathrm{data}}_k$ of the tokenized training set. The target reflects the physics of the system (Figure~\ref{fig:entropytarget}). In every
+tokenizer family, the finest scales have the highest entropy, consistent with turbulence
+concentrating its diversity in the small scales, and the profile is close to linear in the log of the scale resolution. It is also a property of the tokenizer family and not of the autoencoder size, since the three VQ sizes overlay.
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=0.6\linewidth]{per_scale_temp/entropy_profile}
+\caption{The calibration target from step (1). The per-scale marginal token entropy of the tokenized training set for all nine tokenizer configurations (three VQ sizes overlaid per family). The finest scales have the highest entropy, close to linear in log resolution; the profile is a property of the tokenizer family, not the autoencoder size.
+}
+\label{fig:entropytarget}
+\end{figure}
+
+Step (2) measures the response: the rollout's horizon-aggregated emitted-token marginal
+entropy $H^{\mathrm{roll}}_k(T)$. The response is a property of the model's closed loop
+rather than the tokenizer's (models sharing a tokenizer solve to temperatures spanning
+0.3 on sc917 to 1.6 on sc341 across our grid), so it is measured per model from
+diagnostic rollouts. A diagnostic rollout is one free-running trajectory scored on its
+own emitted tokens. The first probe runs at $T{=}1$, the sign of the measured gap $H^{\mathrm{roll}}_k(1) - H^{\mathrm{data}}_k$ on the finest scales sets the search direction, and subsequent probes step outward until the gap changes sign, which brackets the crossing. Every response curve we measured is monotone in $T$ up to sampling noise (removed by a running maximum before inverting), so two bracketing probes determine the solution. Step (3) solves for one global
+temperature $T^\ast$: every scale is sampled at the same $T$, and $T^\ast$ is the zero of
+the averaged gap on the finest two scales $\mathcal{F}$, the scales that drive the
+collapse, found by linear interpolation inside the bracket:
+\begin{equation}
+g(T) \;=\; \tfrac{1}{2}\textstyle\sum_{k\in\mathcal{F}}
+\big[H^{\mathrm{roll}}_k(T) - H^{\mathrm{data}}_k\big] \;=\; 0
+\qquad \text{(all scales sampled at $T$)}.
+\label{eq:globalread}
+\end{equation}
+The coarse scales are sampled at $T^\ast$ too; only the finest two enter the solve. The
+solve reads tokens only, and EMD and spectra enter at evaluation time
+(Section~\ref{sec:experiments}). We call the solved temperature $T^\ast$ the read, since
+it is read from tokens. We deploy the read against $N{=}128$ sweeps across all
+45 (model, tokenizer) cells, with the response curves read off the sweep's own rollouts,
+and end to end on five cells with fresh diagnostic rollouts. A per-scale temperature, one
+$T_k$ per scale, is discussed as future work (Appendix~\ref{app:future}).
+
+We tested the calibration end to end on five cells: two on sc917, two on sc1941, and one
+on sc341, covering the three VQ sizes. On each cell we start at $T{=}1$; the sign of $g(T)$
+(Equation~\ref{eq:globalread}) sets the direction, positive meaning the rollout emits more
+fine-scale entropy than the data and the temperature must fall, and we step by 0.2 in
+that direction until $g$ changes sign, then interpolate the zero crossing between the two
+bracketing temperatures. Temperature calibration required one rollout of 250 steps on sc917 and sc1941 and four rollouts of 250 steps on sc341. The five cells bracketed within five to eight temperatures each
+(Table~\ref{tab:deploy}).
+
+On every cell the calibrated temperature lands within 0.05 of the same solve run on the
+full sweep's rollouts, 128 trajectories of 2{,}000 steps: 0.005 to 0.048. We then rolled
+each calibrated temperature out at $N{=}128$ for 2{,}000 steps and scored it against
+ground truth. EMD is 0.003 to 0.131 above the sweep's minimum on the four sc917 and
+sc1941 cells and 0.414 above it on the sc341 cell. The 0.414 is not a precision failure,
+since that cell's calibrated temperature is within 0.048 of the full solve. sc341 has no
+cold failure for the calibration to prevent (Figure~\ref{fig:global341}), so the extra
+warmth only raises EMD.
+
+We measured how short the diagnostic rollouts can be on all 45 cells by truncating and
+subsetting the sweep's own rollouts and solving from the truncated marginals
+(Figure~\ref{fig:diagmulticell}). Against the full solve, one trajectory of 250 steps
+lands within 0.05 on all 30 sc917 and sc1941 cells, and 96\% and 99.8\% of the
+individual draws land within 0.05. On sc341, one trajectory of 250 steps lands above
+the full solve, by 0.135 on the median cell and 0.42 on the worst, and 21\% of draws
+land within 0.05. Four trajectories of 250 steps bring the median cell to 0.035 above,
+with 66\% of draws within 0.05; one trajectory of 1{,}000 steps brings it to 0.037, with
+70\%; four trajectories of 1{,}000 steps reach 97.5\%. sc341 needs the extra trajectories
+because its response is flat: 0.13 nats per unit of $T$ on its finest two scales against
+0.45 on sc917 and 0.62 on sc1941, so the same entropy error is a 3.5 to 5 times larger
+temperature error.
+
+The calibration uses training tokens and the model's own emitted tokens during rollout.
+In comparison, a rollout sweep needs many long-run ground-truth references to score against.
+The calibration generates 1{,}250 to 2{,}000 frames per cell on sc917 and sc1941 and
+8{,}000 on sc341, scored as token histograms without requiring decoding into pixels. The $N{=}128$ sweep
+required decoding and scoring 1.28M frames per cell.
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\linewidth]{diag_multicell/convergence_signed}
+\caption{The cost of the calibration, validated on all 45 cells. Each panel shows the signed
+deviation of the truncated solve from the full 128-trajectory, 2{,}000-step solve against
+the diagnostic horizon for one family. The line is the median and the band is the 5--95\%
+range over cells and draws (32 single-trajectory draws or 8 four-trajectory draws per
+cell), the gray band is the $\pm 0.05$ tolerance, and the dash-dot line is the deployed
+rollout length of 250 steps. A single trajectory is warm at short horizons and a pooled
+marginal is cold on sc917 and sc1941, and both close by 250 steps. One trajectory of 250
+steps is enough on sc917 and sc1941, and sc341's flatter response needs four.}
+\label{fig:diagmulticell}
+\end{figure}
+
+\begin{table}[!htb]
+\centering\small
+\caption{End-to-end deployments of the calibration on five cells. Each temperature is scored by
+one 250-step rollout (four on sc341), starting from $T{=}1$ and stepping by 0.2 in the
+direction of the gap's sign, and $T^\ast$ is the zero crossing interpolated between the two
+bracketing temperatures. EMD is the $N{=}128$, 2{,}000-step evaluation at $T^\ast$ against
+ground truth, the swept argmin and its EMD come from the $N{=}128$ sweep, and regret is
+their difference. The validation sweep cost 1.28M decoded frames per cell.}
+\begin{tabular}{lrrrrrr}
+\toprule
+cell & temperatures & frames & $T^\ast$ & EMD & swept argmin (EMD) & regret \\
+\midrule
+medium-sc917-s34 & 6 & 1{,}500 & 1.873 & 0.250 & 1.6 (0.119) & 0.131 \\
+small-sc917-s22 & 6 & 1{,}500 & 1.868 & 0.196 & 1.8 (0.187) & 0.009 \\
+large-sc1941-s48 & 5 & 1{,}250 & 1.742 & 0.217 & 1.4 (0.157) & 0.060 \\
+medium-sc1941-s113 & 8 & 2{,}000 & 2.211 & 0.144 & 2.2 (0.141) & 0.003 \\
+medium-sc341-s18 & 8 & 8{,}000 & 2.345 & 0.547 & 1.2 (0.133) & 0.414 \\
+\bottomrule
+\end{tabular}
+\label{tab:deploy}
+\end{table}
+
+We tested the single-step alternative in both its forms, and both fail. The strongest
+anchor solves
+$H(\mathrm{softmax}(z_k/T_k)) = \mathrm{CE}_k$ per scale on teacher-forced
+logits\label{sec:gate}, since overconfidence is the textbook cause of degenerate
+free-running generation. However, the measured gap $\mathrm{CE}-H$ is at or below zero at
+every scale ($-0.09$ to $-0.32$ nats at the finest), so the solved temperatures never leave
+$T\leq 1$ while swept optima on warm configurations sit at 1.8--2.2. Teacher forcing holds
+the model on the data manifold, where it is calibrated; the extra warmth compensates for
+what happens off the manifold, which no teacher-forced statistic measures
+(Appendix~\ref{app:secondary}, Figure~\ref{fig:calibgate}). 
+
+We also compare against the brute-force alternative of sweeping temperature per cell at
+$N{=}128$, on the 15-cell sc1941 grid (Figure~\ref{fig:schedule}; sc917/sc341 analogs in
+Appendix~\ref{app:secondary}, Figures~\ref{fig:global917},~\ref{fig:global341}). Greedy
+decoding is erratic, fine on some cells and exploding on others (EMD $0.19$--$5.6$, above
+our explosion threshold of EMD 1.0 on 4 of 15 cells). The cold sweep edge, $T{=}1.4$, is above
+the swept optimum, the swept temperature with the lowest ensemble EMD on the cell, by a
+median 0.27 EMD, explodes on 3 cells, and has the largest spectral error of
+the sampled arms on 14 of 15, the spectral drain of Section~\ref{sec:greedy}. The hot
+edge, $T{=}2.2$, has the lowest spectral error on 7 of 15 cells and is above the optimum
+by a median 0.30 EMD, the over-heat failure of Figure~\ref{fig:failuremodes}, where the
+spectrum improves while the pixel distribution degrades. The read temperature, rounded
+to the nearest swept temperature, explodes nowhere and is above the optimum by a median
+0.11 EMD: it is the only sampled arm with EMD under 1.0 on every cell, and it does not
+reach the swept optimum (Section~\ref{sec:limitations}).
+
+We then deployed the read as one global temperature against the $N{=}128$ sweeps on all
+45 cells, solving against the training-set token entropy of step (1). In every cell the
+sweep brackets the solved temperature, with a swept point on each side of it. On 13 cells the gap $g(T)$ was still negative at the original sweep's
+hottest temperature, so we extended the sweep by two hotter temperatures on those cells
+(2.4 and 2.8 on sc917, 2.6 and 3.0 on sc1941) until it bracketed the solved temperature.
+
+\begin{table}[!htb]
+\centering\small
+\caption{The read against the $N{=}128$ sweep, by tokenizer family (15 cells each). A read is
+inside the interval when both swept temperatures bracketing it have an ensemble EMD under the
+bar. The regret is the ensemble EMD at the read, interpolated between the bracketing swept
+temperatures, minus the ensemble EMD at the swept argmin, both at 2{,}000 steps against ground
+truth. The count of 42 does not change under trajectory resampling, since the standard error of
+the ensemble EMD is at most 0.005 at every bracketing temperature. The read is inside the
+interval on 42 of the 45 cells and warmer than the argmin on 43, and the median regret is 0.19
+EMD.}
+\newcommand{\hdr}[1]{\begin{tabular}[c]{@{}c@{}}#1\end{tabular}}
+\begin{tabular}{lcccccc}
+\toprule
+family & \hdr{inside the interval\\bar 1.0 / 0.75 / 0.5} & \hdr{read $-$ argmin\\median $\Delta T$} & \hdr{warmer /\\colder} & \hdr{regret\\median (IQR)} & \hdr{regret\\$\leq 0.1$ / $\leq 0.2$} & \hdr{max\\regret} \\
+\midrule
+sc341  & 15 / 12 / 2  & $+1.03$ & 15 / 0 & 0.26 (0.20--0.37) & 0 / 4   & 0.49 \\
+sc917  & 15 / 14 / 10 & $+0.15$ & 13 / 2 & 0.14 (0.04--0.19) & 7 / 12  & 0.51 \\
+sc1941 & 12 / 9 / 7   & $+0.25$ & 15 / 0 & 0.13 (0.08--0.32) & 7 / 8   & 0.61 \\
+\midrule
+all    & 42 / 35 / 19 & $+0.34$ & 43 / 2 & 0.19 (0.09--0.32) & 14 / 24 & 0.61 \\
+\bottomrule
+\end{tabular}
+\label{tab:outcome}
+\end{table}
+
+Table~\ref{tab:outcome} compares the read with the $N{=}128$ sweep on all 45 cells. In 42 of
+the 45 cells the read lies inside the non-exploded interval, the set of swept temperatures at
+which the ensemble EMD against ground truth stays under 1.0. The three cells outside it are
+sc1941 cells whose read falls between the hottest non-exploded swept temperature, 2.2, and the
+first exploded one, 2.6. We deployed one of them, medium-sc1941-s113, in
+Table~\ref{tab:deploy}, and it scored an EMD of 0.144. The other two are the 31M-parameter
+models under the small and medium VQ, and their EMD interpolated between the two bracketing
+sweep points is 0.80 and 0.95. In 43 of the 45 cells the read is warmer than the swept
+EMD-argmin, the swept temperature with the lowest ensemble EMD on the cell, by a median of
+0.34 in temperature, and on sc341 by 1.03. Because the calibration matches the entropy of the
+training data rather than minimizing the EMD, the rollout at the read has a higher EMD than the
+rollout at the argmin. We call this difference the regret. Over the 45 cells the median regret
+is 0.19 EMD, 0.13 to 0.14 on sc917 and sc1941 and 0.26 on sc341
+(Figure~\ref{fig:regret}). On sc341 every rollout at the read stays on-manifold, and the
+regret is the EMD increase between the argmin and the warmer read
+(Figure~\ref{fig:global341}).
+
+sc341 has no cold failure for the calibration to prevent. Greedy decoding and the cold
+sweep edge ($T{=}0.8$) stay on-manifold in 14 of its 15 cells, and on those 14 greedy is
+within 0.08 EMD of the swept optimum and the cold edge within 0.12
+(Figure~\ref{fig:global341}). The exception is the smallest model with the small VQ, where
+greedy and the cold edge score EMD above 0.8 and the read 0.48. On the other 14 cells the
+calibration prevents nothing and only adds tail energy at an EMD cost, up to 0.41 on the
+deployment cell (0.547 at the read against 0.133 at the argmin). The diagnostic rollouts
+that solve for the read also measure the response slope, and the slope identifies this
+regime before the read is used: sc341's response slope is 0.13 nats per unit of $T$
+against 0.45 and 0.62 on sc917 and sc1941, and on the three families of this paper a flat
+response coincides with a cold edge that stays on-manifold and a read with a large regret.
+With three families this is an observation and not a validated rule, so we offer the slope
+as the indicator to check on a new system before running the rollout at the read's warmer
+temperature.
+
+The extra warmth only changes the spectrum in the tail. In the resolved range, the
+wavenumbers where the tokenizer floor holds at least half the true energy, the rollout's
+energy is at the tokenizer floor both at the swept argmin and at the read (medians 0.95 to 1.09 and 0.98 to 1.03
+of floor across the families). In the tail beyond it, energy relative to the floor rises
+from 0.60, 0.54, and 0.38 at the argmin to 0.97, 0.67, and 0.50 at the read for sc341,
+sc917, and sc1941, at a median regret of 0.26, 0.14, and 0.13 EMD. At the families' cold
+edges the tail energy is 0.60, 0.32, and 0.21 of floor (Appendix~\ref{app:secondary},
+Figure~\ref{fig:phasediagram}).
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\linewidth]{per_scale_temp/global_outcome_sc1941}
+\caption{The temperature axis on the 15-cell sc1941 grid. Pixel EMD (top) and TKE spectral error
+(bottom) against NSP size, one column per VQ tier. The arms are greedy decoding ($N{=}1$),
+the cold and hot edges of the sweep ($T{=}1.4$ and $2.2$, the range swept on every cell,
+$N{=}128$), the calibrated global read rounded to the nearest swept temperature
+($N{=}128$), and the swept best-$T$ yardstick (dashed), the swept temperature with the
+lowest ensemble EMD on each cell. The two rows have to be read together: the hot edge has the lowest spectral error on the large-VQ column and is the
+direction of the fuzzy field of Figure~\ref{fig:failuremodes}, and greedy's low EMD on
+some cells is the banded field. The gray band is EMD above the explosion bar of 1.0.}
+\label{fig:schedule}
+\end{figure}
+
+% =====================================================================
+\section{Experiments}
+\label{sec:experiments}
+
+All results share one evaluation grid: nine tokenizers (three token budgets
+sc341/sc917/sc1941 $\times$ three autoencoder sizes) crossed with five NSP sizes gives 45
+(model, tokenizer) cells, and every swept point is an $N{=}128$-trajectory ensemble of
+2{,}000-step rollouts. We evaluated each cell at its swept-optimal $T$ ($N{=}128$).
+
+\subsection{Scaling}
+\label{sec:scaling}
+
+Long-rollout EMD saturates with NSP size well before the token budget saturates, and 
+the tokenizer family sets the maximum attainable band (Figure~\ref{fig:scaling}, right).
+Growing the NSP model past medium size does not improve the rollout statistics; growing the token budget does.
+
+The rollout obeys a different scaling law from the single step. Teacher-forced
+cross-entropy keeps falling with NSP size, strictly monotone in all nine (family, VQ-tier)
+columns and by 22.5--34.4\% from smallest to largest (Figure~\ref{fig:scaling}, left),
+while the rollout EMD has already saturated (right) and the rollout's spectral error
+worsens with size. With the three shallow-wide architectures included, six of the nine
+columns stay monotone. Cross-entropy selects the largest model in every column, and that
+model is rollout-best by EMD in three of nine columns and by spectral error in one of
+nine. The single-step evaluations cover all
+three families with 1{,}999 held-out pairs per cell. As with the continuous baseline
+(Section~\ref{sec:baselines}), additional capacity improves next-token accuracy but not
+the closed-loop statistics.
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\linewidth]{scaling_n128/scaling_two_laws}
+\caption{Two scaling laws. Left: teacher-forced cross-entropy per token improves monotonically with
+NSP size in every (family, VQ-tier) column, by 22.5--34.4\% from smallest to largest.
+Color is the tokenizer family and shade is the VQ tier. Right: ensemble EMD at each cell's
+swept best $T$ ($N{=}128$), median across VQ tiers per family, saturates with NSP size.
+The dotted lines are each family's median tokenizer floor, so the token budget and not
+the dynamics model sets the attainable band. The shallow-wide architectures are excluded
+from both panels.}
+\label{fig:scaling}
+\end{figure}
+
+\subsection{Metrics}
+\label{sec:metrics}
+
+The temperature axis fools each scalar metric in one direction. On the hot side, TKE spectral error improves
+monotonically up to $T{=}3.0$ on the sc341 hot edge while EMD triples and the jets lose
+coherence. High-$T$ sampling adds energy in exactly the tail the spectrum measure rewards, so a
+rollout can improve its spectral error by emitting noise (Figure~\ref{fig:failuremodes}
+shows the same effect in a single cell). On the cold side, EMD keeps improving as the
+turbulence fades into banding, and the pixel distribution over-sharpens before EMD notices
+(Appendix~\ref{app:exhibits}, Figure~\ref{fig:temprows}). Integrated statistics are also
+blind to redistribution, since the collapse and the tail deficit both conserve total
+energy while moving it across $k$ (measured on our own best model in
+Section~\ref{sec:baselines}). % CORRECTION 08-25 (review response): metrics: ΔH is the online proxy for the decoded spectrum, validated against it, not the arbiter
+
+Because of this, we report spectra, distributions, and snapshots together everywhere, and
+we use ensembles to adjudicate and individual frames to illustrate. Token-space drift, the
+finest-two-scale gap $\Delta H$ between the rollout's emitted-token entropy and the
+training-set token entropy, is the online proxy for the spectrum: it is computed from the
+emitted tokens during the rollout, with nothing decoded. Across the 326 (cell, $T$) points
+of the sweep, the rank correlation of $\Delta H$ with the decoded rollout's tail energy
+relative to the tokenizer floor is 0.87, with EMD it is 0.37, and with the energy in the
+resolved range it is $-0.02$. The sign of $\Delta H$ detects the spectral drain that EMD
+does not see, and the phase diagram
+(Appendix~\ref{app:secondary}, Figure~\ref{fig:phasediagram}) colors every sweep point by
+the decoded tail retention with the $\Delta H{=}0$ crossing overlaid.
+
+\subsection{Calibrated Rollouts}
+\label{sec:perclass}
+
+Figure~\ref{fig:perclass} shows the calibrated rollouts family by family; the spectra and
+pixel PDFs of all 45 cells are in Appendix~\ref{app:exhibits} (Figure~\ref{fig:hierarchy}). The best cell of
+each tokenizer family is shown at its swept-optimal temperature against its own references. All
+three are in the medium VQ tier. The optimal warmth rises with token budget
+(swept optimum $T = 1.1 / 1.6 / 2.2$ for sc341/sc917/sc1941), which is the trend predicted by the
+calibration. At $t{=}1500$ every field is still fully turbulent, each time-averaged
+spectrum sits on its tokenizer-reconstruction curve through the resolved range, and the
+pixel distributions sit on the data; the residual high-$k$ gap to ground truth is the
+tokenizer floor (Section~
+ef{sec:tokenizer}). Ensemble EMD against each
+family's floor is $0.14$ vs $0.23$ for sc341, below its own floor by the mode-averaging
+effect (Appendix~\ref{app:secondary}); $0.12$ vs $0.11$ for sc917, at floor; and $0.14$ vs
+$0.06$ for sc1941, the stationary joint-level residual discussed in
+Section~\ref{sec:limitations}.
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\linewidth]{headline/perclass_rows}
+\caption{The best cell of each tokenizer family at its swept-optimal temperature ($N{=}128$
+rollouts of 2{,}000 steps, trajectory 0 shown). Left: the rollout field at $t{=}1500$.
+Middle: the time-averaged TKE spectrum against ground truth and the tokenizer
+reconstruction. Each rollout is on its own floor through the resolved range. Right: the
+pixel distribution. Ensemble EMD against the floor is $0.14/0.23$ for sc341 (below floor
+by mode-averaging), $0.12/0.11$ for sc917, and $0.14/0.06$ for sc1941.}
+\label{fig:perclass}
+\end{figure}
+
+\subsection{Baselines}
+\label{sec:baselines}
+
+The continuous baseline behind Figure~\ref{fig:offmanifold} is the same ViT autoencoder
+wired as a continuous next-frame regressor and rolled for 2{,}000 steps, in five arms:
+plain, input-noise low and high, pushforward, and a medium-sized plain arm as a capacity
+control. The plain arm's one-step spectrum is essentially exact (median $|\log_2|$
+deviation 0.004), yet by the end of the rollout its mid-$k$ band sits at
+$2.1$--$2.8{\times}$ reference, with low-$k$ inflating past step ${\sim}500$: one-step
+metrics predict nothing about the closed-loop attractor.
+
+The baseline pushforward wins across the time-averaged spectrum. It is
+closer to ground truth than the tokenizer floor, the discrete ceiling, for
+$k \gtrsim 0.5$ (Figure~\ref{fig:pushfwdexp}). 
+If the quantity of interest is an ensemble-mean statistic, pushforward is the better tool
+on this system: it beats the tokenizer floor across the spectrum and is 0.03 ahead of the
+calibrated discrete arm on EMD. If the
+quantity of interest is the statistic of any individual run, the comparison reverses. 
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\linewidth]{baselines/pushforward_expectation}
+\caption{Every time-averaged metric prefers the pushforward baseline. Left: its time-averaged TKE
+spectrum follows ground truth through the resolved range and beats the tokenizer floor,
+the ceiling on any discrete arm (TKE RSE 0.30 against the floor's 0.65 and the calibrated
+discrete rollout's 0.79). Right: its pixel distribution is closer to the data than the
+calibrated discrete arm's by 0.03 on EMD (0.16 against 0.19). The calibrated discrete arm is
+the medium-sc917-s34 cell of Table~\ref{tab:deploy} at its read rounded to the nearest swept
+temperature ($T^\ast{=}1.873$, $T{=}1.8$), averaged over the 128 trajectories of the sweep
+rollout; the pushforward arm is averaged over 16. Both panels are expectations over the
+rollout. What a single run holds at any given step is the subject of
+Figure~\ref{fig:concentration}, on the same rollouts (16 trajectories each, 2{,}000 steps).}
+\label{fig:pushfwdexp}
+\end{figure}
+
+Figure~\ref{fig:concentration} puts each 2{,}000-step rollout against its own spectral
+reference (the tokenizer reconstruction's long-run spectrum for the discrete arms, the
+model's own one-step spectrum for the continuous ones), as median plus cross-trajectory
+5--95\% band, per-step and 250-step-windowed. 
+The calibrated discrete arm is the medium-sc917-s34 cell of Table~\ref{tab:deploy} at its
+read rounded to the nearest swept temperature ($T^\ast{=}1.873$, $T{=}1.8$), and it
+concentrates, meaning its windowed statistic settles into a narrow band as the window grows.
+Its 250-step-windowed band, the cross-trajectory 5--95\% range of the windowed
+energy ratio, has width 0.084 (bootstrap over trajectories, 5--95\%: 0.066--0.088). The
+autocorrelation time of its per-step energy excursions, the lag at which a trajectory's
+autocorrelation first falls below $1/e$, is 7--34 steps (median 10), and windowing shrinks
+each trajectory's own per-step spread by a factor of 0.14--0.53 (median 0.36 over the 16
+trajectories). We use the true system's own wander as the control.
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\linewidth]{baselines/f71_stick_2x2_total}
+\caption{Estimator concentration. Total spectral energy per step relative to each model's own
+reference (the tokenizer reconstruction's long-run spectrum for the discrete arms, the
+model's own one-step spectrum for the continuous ones), as the median and the cross-trajectory 5--95\% band, per-step (light) and
+250-step-windowed (dark), with the 250-step spin-up cut. Gray is the ground truth's own
+250-step-averaged band across fifteen disjoint 2{,}000-frame segments of the record,
+width 0.095 (0.071--0.108). The discrete arms are the medium-sc917-s34 cell of
+Table~\ref{tab:deploy}, 16 trajectories each, at its read rounded to the nearest swept
+temperature ($T{=}1.8$) and at the cold edge of the sweep ($T{=}1.2$). The calibrated
+discrete arm's windowed band is 0.084 (bootstrap over trajectories, 5--95\%: 0.066--0.088),
+centered at 1.09. The cold discrete arm's band is 0.089 (0.063--0.095), and its collapse is
+in the composition of the spectrum (Figure~\ref{fig:bandedconc}). The pushforward arm (16
+trajectories) has a windowed band close to its per-step band, 0.353 (0.210--0.418). The
+plain arm fans out to 1.60 (0.74--1.76).}
+\label{fig:concentration}
+\end{figure}
+
+The control is the raw record cut into fifteen disjoint 2{,}000-frame segments treated as
+trajectories and normalized by the held-out window's time mean. Its per-step band is 0.115
+and its windowed band is 0.095 (bootstrap over segments, 5--95\%: 0.071--0.108), with
+per-segment long-run means within 0.92--1.02 of the held-out reference (gray in
+Figure~\ref{fig:concentration}). The calibrated
+discrete arm's 0.084 lies inside the bootstrap interval of the true system's band,
+0.071--0.108. The band is centered at 1.09 rather than at 1.0. 
+
+Every trajectory's long-run total energy is 1.07--1.12 times its floor's, which is the low-$k$ excess of
+Figure~\ref{fig:bandedconc}, so the arm concentrates on a total 9\% above its reference.
+The cold discrete arm, the same cell at the cold edge of the sc917 sweep ($T{=}1.2$),
+concentrates as well, with a windowed band of 0.089 (0.063--0.095), and its collapse is in
+the composition of the spectrum rather than in the total. Its mid-$k$ band settles at
+0.31--0.33 of the floor across trajectories against 0.57--0.61 at $T{=}1.8$, and its
+high-$k$ band at 0.23--0.26 against 0.43--0.47. The high-$k$ band keeps draining until step
+${\sim}1{,}100$, whereas the calibrated arm's bands are in place by step 50
+(Figure~\ref{fig:bandedconc}). Colder still, the collapse reaches the total. The per-token
+arm of the mask ablation (small-sc917-s34) at $T{=}0.7$ has a windowed band of 0.222
+(0.144--0.235), and its low-$k$ band declines from 0.955 to 0.874 between the first and
+last quarters of the run, which is the diffusive collapse as it appears in the spectra.
+
+The continuous pushforward arm is stable in the ensemble mean only. Over 16 trajectories
+its windowed band is 0.353 (0.210--0.418), close to its per-step band and 3.7 times the
+true system's 0.095, under a coherent wander with an autocorrelation time of 37--195 steps
+(median 82), with long-run mid-$k$ states spanning $0.91$--$1.69{\times}$ across the
+trajectories, so no practical window captures what spectrum a single run holds. Within a trajectory, 
+windowing shrinks the spread by 0.34--0.92 (median 0.65), so the per-trajectory ranges of the pushforward arm and
+the calibrated discrete arm overlap, and the separation between them is in the
+cross-trajectory band. An earlier run of this arm with eight
+trajectories from a different set of initial conditions gave 0.232 (0.086--0.293), and adding
+trajectories widened the band. We report the 16-trajectory value, and its bootstrap interval,
+0.210--0.418, does not overlap the calibrated discrete arm's, 0.066--0.088.
+
+The band a continuous arm settles into is set by its training procedure and
+not by its architecture: the pushforward arm and the plain arm share an architecture, and
+their windowed bands differ by a factor of ${\sim}4.5$ (0.353 against 1.60), so the
+margin a system gets cannot be known before the rollout is run. The plain continuous arm accumulates error, with a windowed band of 1.60
+(0.74--1.76) and growing while its one-step spectrum is exact. Against a common reference,
+the ground-truth spectrum instead of each arm's own, the ordering holds. The windowed band
+is 0.084 (0.066--0.088) for the calibrated discrete arm and 0.351 (0.209--0.416) for
+pushforward. Every calibrated trajectory's long-run total energy lies within 1.07--1.12 of
+the truth's, a narrow band 9\% high, against 0.85--1.28 for pushforward, a wide band
+centered near the truth, and 1.07--1.14 for the cold discrete arm (Appendix~\ref{app:exhibits}, Figure~\ref{fig:concgt}).
+
+The banded mechanism panels (Appendix~\ref{app:exhibits}, Figure~\ref{fig:bandedconc}) show the calibrated arm's deficit
+relative to its own floor established within ${\sim}50$ steps and stationary thereafter
+($|$slope$| \leq 0.02$ per 1000 steps over the second half in every band), with the total
+9\% above the floor: the residual moves energy from mid and high $k$ to low $k$ rather than
+losing it.
+
+
+% =====================================================================
+\section{Limitations}
+\label{sec:limitations}
+
+All results in this work come from one system: every claim is scoped to this 2D turbulence
+dataset, and the demonstrated transfer is across 45 model/tokenizer configurations within
+it rather than across PDEs. The global temperature read is a stability calibration and not an
+accuracy optimizer. The read is warmer than the EMD-optimal swept temperature in nearly every
+cell (Table~\ref{tab:outcome}), and a user who wants the lowest EMD on a cell still needs the
+sweep. On sc341, where greedy decoding is already on-manifold in 14 of 15 cells, the
+calibration prevents nothing and only adds regret, and its benefit is on the families with a
+cold failure, sc917 and sc1941. A
+calibration that is sweep-free and EMD-optimal at once remains open
+(Appendix~\ref{app:future}). A
+joint-level residual also remains: the calibrated rollout holds ${\sim}0.4$--$0.5{\times}$
+of its own floor's band energy below the spectral peak. This residual is stationary,
+energy-conserving, and countable, but it is real, and marginal calibration does not close
+a joint statistic.
+
+% =====================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+A discrete multi-scale surrogate holds the long-run statistics of 2D turbulence for
+thousands of steps, and not because discreteness grants stability. Tokenization allows us
+to determine instabilities by directly comparing live rollout statistics to the data
+distribution, and stable rollouts require matching the two distributions. Marginal-entropy
+calibration performs that matching with a few short diagnostic rollouts scored on their
+own emitted tokens instead of a ground-truth-scored sweep; its target is computed from
+the tokenizer and dataset alone, and ground truth enters only at evaluation, which makes
+it a candidate default for the next system.
+The calibration delivers a rollout that does not collapse and does not explode, and not
+the lowest error. The calibrated temperature is warmer than the EMD-optimal swept
+temperature in nearly every configuration, and the rollout at it scores a higher EMD than the
+rollout at that optimum. That difference is the cost of not running the sweep. Open directions, including a per-scale
+temperature, are in Appendix~\ref{app:future}.
+
+
+\newpage
+
+% From the references on, stop vertically justifying pages: the appendix's [H]
+% figures force page breaks, and \flushbottom was stretching the glue between
+% bib entries and appendix bullets into large mid-page gaps.
+\raggedbottom
+\bibliography{references}
+\bibliographystyle{tmlr}
+
+\newpage
+
+\appendix
+
+\section{Open directions}
+\label{app:future}
+
+Several directions remain open: the continuous-latent isolation, rolling out in latent
+space without decoding at every step, the same calibration on PDEs we have not touched,
+and a per-scale temperature (Figure~\ref{fig:perscalefuture}). The global read heats
+every scale by the same amount, although the entropy drain it corrects is fastest at the
+finest scales. On the sc1941 grid we ran
+two per-scale schedules against the same $N{=}128$ sweep. A hand-set schedule that leaves
+the coarse scales at $T{=}1$ and heats only the finest two, to one fixed value per VQ tier
+chosen from the three we ran (3.0 under the small and medium VQ, 2.0 under the large), is
+a median 0.01 EMD from the swept single-temperature optimum, against 0.11 for the global
+read: below the optimum by more than 0.03 on 4 of 15 cells, within 0.03 on 6, and above it
+on 5, one of those above the explosion bar (small VQ, 31M NSP, EMD 1.16 where the global
+read's rollout has EMD 0.79). Its spectral error is below the optimum's on 11 of 15. The solved schedule,
+one temperature per scale matching that scale's emitted entropy to the training set's,
+ends up close to the global read: on the coarse scales and on the finest scale the rollout's emitted
+entropy never reaches the training set's at any temperature we swept, so 51 of the 90
+scale-temperatures pin to the hottest swept temperature, 2.2, the finest scale on every
+cell, and the result is a near-flat schedule whose EMD is below the global read's on 10 of 15
+cells (median 0.26 against 0.31) and below the swept optimum on none. The solved schedule
+also concentrates the way the global read does. On the same 15 cells the 250-step-windowed
+band of Section~\ref{sec:baselines} is 0.067--0.119 (median 0.080) for the solved schedule
+and 0.058--0.091 (median 0.076) for the global read, within 0.034 of each other on every
+cell, and the band's center is between 0.94 and 1.03 of the tokenizer floor for both.
+Concentration is a property of the discrete rollout at any sampled temperature, including
+the medium-VQ 139M cell's read at $T{=}2.6$ with EMD 0.80, and not of the schedule. The
+schedules differ in the level at which the mid-$k$ band settles and not in the band's width.
+Heating the coarse
+scales alone to 2.0 explodes the same four cells greedy does. Solving for the fine-scale
+temperatures from the training-set entropy, instead of choosing them by hand, is the open
+step.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{per_scale_temp/perscale_future_work}
+\caption{Per-scale temperature as an open direction, on the sc1941 grid. Left: temperature per
+scale for three schedules. The solved per-scale schedule (thin green, one line per cell)
+matches each scale's emitted entropy to the training data's. On the coarse scales and the
+finest scale the emitted entropy never reaches the data's at any swept temperature, so the
+solve pins to the hottest swept temperature of 2.2 (dotted) on 51 of 90
+scale-temperatures, and scale 2 falls back to $T{=}1$ where its response is flat. The
+hand-set fine-only recipe (purple) leaves the coarse scales at 1 and heats the finest two
+to 3.0 under the small and medium VQ and 2.0 under the large, and the coarse-heat control
+(gold) is its mirror. Right: pixel EMD of those arms against NSP size per VQ tier, with
+the global read (green squares) and the swept best-$T$ yardstick (dashed). Every sampled
+arm is $N{=}128$ trajectories of 2{,}000 steps, and the gray band is EMD above the
+explosion bar. The fine-only recipe is on the yardstick where the global read is above it and
+explodes on one cell, and the coarse-heat control explodes on the four cells greedy
+does.}
+\label{fig:perscalefuture}
+\end{figure}
+
+
+% =====================================================================
+% Appendix reordered 08-04 (user): leading exhibits first (fig:hierarchy,
+% fig:temprows, fig:bandedconc, fig:singlestep, fig:modea in that order), then
+% tokenizer analysis (the old Appendix B), then the support-mask ablation, then
+% the remaining secondary results. Captions are self-contained; the argument
+% prose stays in its home section and cross-references these figures.
+\section{Extended exhibits}
+\label{app:exhibits}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{grids/analysis_tke_spectrum}\\[4pt]
+\includegraphics[width=\linewidth]{grids/analysis_pixel_histogram}
+\caption{Time-averaged TKE spectra (top) and pixel PDFs (bottom) for every cell of the 45-cell
+grid, the full grid behind the per-family exhibit of
+Figure~\ref{fig:perclass}.}
+\label{fig:hierarchy}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{snapshots_n128_tempcollapse/medium-sc917-nsp-s34_temp_rows}
+\caption{One row per sampling temperature for medium-sc917 (trajectory 0). Each row shows the
+rollout at $t{=}10/100/1500$ with the tokenizer reconstruction and the ground truth at
+$t{=}1500$. Cold sampling ($T{=}1.2$) fades toward smooth banding, the swept optimum $T{=}1.6$ and
+the read ($T^\ast{=}1.873$, rounded to the swept $T{=}1.8$ and framed) keep the texture of
+the references, and $T{=}2.0$ roughens. The
+per-row ensemble EMD ($N{=}128$) is at left.}
+\label{fig:temprows}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{baselines/f71_stick_2x2}
+\caption{Banded concentration panels, the mechanism behind Figure~\ref{fig:concentration}.
+Per-step band-energy ratios against each arm's own reference (the tokenizer
+reconstruction's spectrum for the discrete arms, the model's one-step spectrum for the
+continuous ones) in the low, mid, and high $k$-thirds, with the median line and per-trajectory end-of-run ticks.
+The calibrated discrete arm holds its mid-$k$ band at 0.57--0.61 of its floor across
+trajectories and the cold arm at 0.31--0.33; the pushforward arm's trajectories span
+0.91--1.69.}
+\label{fig:bandedconc}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{baselines/f71_stick_2x2_total_vs_gt}
+\caption{Figure~\ref{fig:concentration} against a common reference. Total spectral energy per
+step relative to the ground-truth spectrum for every arm, as the median and the
+cross-trajectory 5--95\% band, per-step (light) and 250-step-windowed (dark), with the
+windowed band width and its bootstrap interval over trajectories.}
+\label{fig:concgt}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.62\linewidth]{inference_samplers/singlestep_exploded}
+\caption{What the single-step route produces in rollout. Ground truth at $t{=}1500$ (left) next to
+a single-step-calibrated rollout at the same lead time (right), with the entropy targeted
+to the per-position tokenizer marginal on small-sc1941. Its EMD is 1.66, and the spectrum
+forgives it again with a TKE error of 0.64 against 0.88 for the greedy-collapsed arm of
+Figure~\ref{fig:failuremodes}. Every
+single-step-driven arm leaves the manifold on every configuration that needs warmth.}
+\label{fig:singlestep}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{mode_diagnostics/mode_a_aligned}
+\caption{The explosion failure, diagnosed from the model's own emissions. 21 of 25 unconstrained
+sc341 trajectories (per-scale-mask era, $T{=}1.0$) explode, and the traces are aligned at
+each trajectory's OOD avalanche (median, IQR shaded). Left: the per-position OOD emission
+rate. Middle: the avalanche by scale; the coarse scales never leak. Right: predictive
+entropy, flat until the explosion and then confident static.}
+\label{fig:modea}
+\end{figure}
+
+% =====================================================================
+\section{Tokenizer analysis}
+\label{app:tokenizer}
+
+We evaluated flat and multi-scale tokenizers at fixed autoencoder size through one evaluation path. Multi-scale has no reconstruction advantage at matched
+token budget (Table~\ref{tab:reconfloor}). Scale count moves the floor and autoencoder
+size does not, with utilization at ${\sim}59\%$ and zero dead codes, so the floor is a
+scale-resolution and deterministic-argmax bound rather than a capacity bound
+(Figure~\ref{fig:vqsizefloor}).
+
+\begin{table}[H]
+\centering
+\caption{Validation-window reconstruction floors for flat and multi-scale tokenizers at the fixed
+Small autoencoder size.}
 \label{tab:reconfloor}
 \begin{tabular}{lrrrrr}
 \toprule
@@ -193,288 +1080,224 @@ sc1941      & 1941  & 0.085 & 0.546 & 0.595 & 2110 \\
 \end{tabular}
 \end{table}
 
-What multi-scale buys is the interface. Generation emits a frame in one forward pass per scale (six for
-sc1941) with within-scale parallelism, instead of a thousand sequential raster steps. More important
-for this paper, the coarse-to-fine factorization is what makes the calibration layer expressible at
-all: the collapse-driving statistics live in the finest scales and the structure-carrying ones in the
-coarsest (Section~\ref{sec:calibration}), and a flat vocabulary has no axis along which to read a
-per-scale entropy target or apply a fine-heat schedule. Whether flat tokens support stable long
-dynamics at all is a separate question from reconstruction; we test it directly with a single-scale
-next-frame predictor on flat-1024 tokens.
-% PENDING: flat-NSP dynamics verdict (jobs 41969397-407); fold result in here and in §7.
-
-\figslot{F3.3 — recon Pareto, flat vs multi-scale (REPLOT from recon-floor metrics,
-Table~\ref{tab:reconfloor} as curve)}{EMD floor and mid-$k$ retention vs tokens/frame, both families on
-one axis.}
-
-\subsection{Next-scale prediction model}
-\label{sec:nsp}
-
-The dynamics model is a VAR-style transformer over token sequences of two consecutive frames. The
-backbone is standard (RMSNorm, QK-norm, bias-free projections, SwiGLU, 2D axial RoPE on cell-center
-coordinates). Scale $k$ of frame $t{+}1$ is predicted from scale $k{-}1$'s hidden states,
-bilinearly upsampled, position-encoded, passed through a shared refinement stack that lets fine-scale
-choices coordinate across neighbors, and read out by a per-scale head over the effective vocabulary.
-Attention is block-causal between scales of the target frame and full toward the conditioning frame.
-Cross-entropy per scale is weighted by $1/\log(n_k{+}1)$ where $n_k$ is the scale's token count.
-% (doc fix carried from outline: the weight is 1/log(n+1), not 1/sqrt(n))
-
-\figslot{F3.5 — NSP schematic + t0/t1 attention mask (HAVE)}{Backbone, expansion heads with shared
-refinement, and the asymmetric [full $t_0$, truncated $t_1$] attention mask.}
-
-\subsection{Training recipe: the untuned interventions}
-\label{sec:recipe}
-
-Two interventions are baked into training for every model in the paper, both derived once and never
-tuned per model. First, the cross-entropy loss is masked to each position's support: a token
-contributes loss only if it was ever observed at that exact (scale, row, column) in the tokenized
-training set. Second, teacher-forced inputs receive substitution noise: with probability 0.10 a
-conditioning token is replaced by a random token legal at its position. This is the discrete analogue
-of pushforward-style input perturbation \citep{brandstetter2022mppde,stachenfeld2022learned}, and we
-cite it as such. Section~\ref{sec:mask} isolates what each choice contributes.
-
-% =====================================================================
-\section{Two failure modes of discrete rollout (M2)}
-\label{sec:modes}
-
-Layer 1 alone fails, and it fails in two distinguishable ways that must not be conflated.
-
-\textbf{Mode A, positional-OOD explosion.} Without a support constraint, sampling occasionally emits a
-token that never occurs at that position in data. The decoder maps the resulting off-manifold token
-map to high-frequency static, the next step conditions on static, and the rollout explodes within tens
-of steps: the per-position OOD-emission rate climbs from roughly 2\% to 28\% while token entropy rises.
-The state leaves the data manifold, and the alarm is the OOD counter itself.
-
-\textbf{Mode B, in-support diffusive collapse.} With the mask in place but sampling too cold, every
-emitted token is individually legal while their joint statistics drift: fine-scale token entropy falls
-off a cliff, top-1 confidence rises, and the decoded field degenerates into smooth non-turbulent
-banding locked to a drain of high-$k$ energy. Nothing is off-support; the alarm is the signed
-per-scale entropy drift.
-
-The two signatures are opposite (entropy up versus entropy down, off-manifold versus in-support), both
-are computable online from tokens without decoding, and no single scalar metric separates them. EMD in
-particular is blind to mode B, which is why Section~\ref{sec:setup} demoted it.
-
-\figslot{F4.1 — two-mode definition figure (distill from posmask-temp diagnostics; do not paste v1
-fig5a/5b)}{Snapshot of each mode vs GT, with one signature trace each: mode A, OOD-rate spike; mode B,
-fine-scale entropy cliff with confidence rise.}
-
-\figslot{F4.2 — temporally locked overlay (REPLOT, E1)}{Time-resolved high-$k$ band energy and OOD rate
-on one axis: the spectral collapse and the OOD spike lock.}
-
-% =====================================================================
-\section{Layer 2: the per-token support mask (M3)}
-\label{sec:mask}
-
-The historical arc is blunt: before any support constraint, cold and unit-temperature rollouts survived
-in 0--4\% of trajectories; with the per-token mask (and substitution noise) survival went to
-88--100\%. The controlled question is which granularity of constraint does the work, and whether the
-mask alone suffices. We trained three arms on one sc917 cell, identical in every respect including the
-0.10 substitution noise: no mask, per-scale mask (a token is legal anywhere in a scale if it ever
-occurs in that scale), and per-token mask. Each arm rolled out 16 trajectories for 2{,}000 steps, cold
-($T{=}0.7$) and warm ($T{=}1.6$).
-
-Two results, one expected and one not. The unexpected one: a noise-trained model needs no mask to
-respect \emph{scale-level} support. The no-mask arm's scale-OOD rate is $1.5\times10^{-6}$ warm and
-zero cold, so the per-scale constraint enforces a boundary the model has already learned. The
-position-level picture is different. The no-mask arm emits position-OOD tokens at a stationary
-$3.5\times10^{-3}$ per token warm (touching 96\% of frames), and the per-scale arm is
-indistinguishable from it at $4.4\times10^{-3}$: bounding each scale's marginal does nothing for the
-per-position support, which is the constraint mode A actually violates. The per-token arm is exactly
-zero by construction. Meanwhile EMD sees none of this. All three warm arms sit in the healthy band
-(0.164--0.212 against the 0.107 tokenizer floor), so a per-token stream of support violations coexists
-with clean pixel statistics until it does not; the alarm layer, not the fidelity metric, is what
-distinguishes the arms.
-
-The expected result: the mask is orthogonal to temperature. All three cold arms degrade diffusively
-(EMD 0.42--0.65) with zero or near-zero OOD emission; mode B does not care about support. Both
-interventions are independently necessary, which is what licenses calling the stack defense-in-depth
-rather than a single fix. Cold-collapse severity also grows with token count: sc341 is stable cold
-(the flat-basin control of Section~\ref{sec:calibration}), sc917 shows mild banding, sc1941 collapses
-unambiguously.
-
-\figslot{F5.1 — mask-ablation OOD traces (HAVE: plots/mask\_ablation\_ood/ood\_rate\_traces.png +
-ood\_by\_scale.png)}{Position-OOD emission rate per arm, cold and warm; per-scale arm overlays the
-no-mask arm, per-token arm at zero. Companion table: warm/cold EMD per arm.}
-
-% =====================================================================
-\section{Layer 3: sampling calibration as a data-read (M4)}
-\label{sec:calibration}
-
-Masked rollouts still require a temperature, and the safe range narrows as the token budget grows:
-sc341 is stable across nearly the whole swept range, sc917 tolerates a band near $T\approx1.6$--$2.0$,
-sc1941 a narrower one near $T\approx1.8$--$2.2$. Finding these bands by sweeping is exactly the
-per-system tuning this paper set out to remove. This section replaces the sweep with a data-read, in
-two rungs we keep deliberately separate.
-
-\textbf{Rung 1: safety, zero-shot.} The training set's per-scale token entropy is a climate statistic.
-A window-invariance property makes it usable as a target: across all nine tokenizer configurations, the
-per-scale token distributions of the training and validation windows differ by at most $1.4\times10^{-2}$
-excess Jensen--Shannon divergence, so a target computed from training data describes the climate the
-rollout is supposed to inhabit. The predicted temperature is the zero-crossing of the signed entropy
-drift $\Delta H_k(T)$ averaged over the two finest scales: the temperature at which the rollout's
-fine-scale entropy matches the data's. The prediction never sees EMD or spectra, so comparing it
-against the swept optimum is a genuine test. Across all 45 cells, the prediction lands inside the
-empirical on-manifold band in 42, with 31 cells bracketing the zero-crossing inside the swept range
-and a median $|T_{\text{pred}}-T_{\text{best}}|$ of 0.31. The three failures are warm sc917 cells
-whose prediction sits 0.1--0.2 above the band's top edge. Rung 1 is a safety statement, not an
-optimality one: on sc341, whose basin is wide on both sides, the prediction sits 0.5--1.4 above the
-EMD-argmin while remaining on-manifold everywhere, and we quantify that regret rather than hide it.
-
-\textbf{Rung 2: optimality, calibrated once.} The mode-B mechanism is fine-scale entropy drain, which
-suggests heating only the finest scales. A schedule that heats the finest two scales (constants chosen
-once from $\{2,3,4\}$ on a single cell) transfers unmodified across the full 15-cell sc1941 grid: on
-spectrum, PDF, and snapshot adjudication it beats the swept best single temperature in 7 cells,
-matches it in 7, and loses in 1. This is config-agnostic, not zero-shot; the caption and the text say
-which.
-
-\textbf{Negative controls.} Single-step adaptive samplers, including confidence-maximizing ones, fail
-into mode B: maximizing per-step confidence is drift in the wrong direction. A fixed data-read
-schedule beats every adaptive sampler we tried.
-
-\figslot{F6.1 — temperature phase diagram (REPLOT + pulled drift verdicts)}{Per token budget: cells
-$\times$ $T$, tri-state \{mode A / mode B / on-manifold\} adjudicated by OOD-rate + drift sign +
-spectra; predicted $T^\ast$ and calibrated schedule marked; band narrows sc341$\to$sc1941.}
-
-\begin{figure}[t]
+\begin{figure}[H]
 \centering
-% \includegraphics[width=0.85\linewidth]{prediction_vs_outcome/prediction_vs_outcome.png}
-\figslot{F6.2 — prediction vs outcome (HAVE, v0.2: plots/prediction\_vs\_outcome/)}{Data-read
-$T_{\text{pred}}$ vs swept best-$T$ per cell, 45\textdegree\ line, on-manifold interval as vertical
-extent; 42/45 in band, 31 bracketed, median gap 0.31.}
-\caption{The calibration claim in one plot: a temperature computed from training-data token
-statistics, never shown EMD or spectra, against the swept optimum. Vertical bars are the empirically
-safe band per cell.}
-\label{fig:predoutcome}
+\begin{subfigure}{0.44\linewidth}
+  \includegraphics[width=0.7\linewidth]{recon_floor/vq_size_floor}
+  \caption{VQ size vs floor}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.52\linewidth}
+  \includegraphics[width=\linewidth]{codebook_analysis/utilization_dead_codes}
+  \caption{codebook utilization}
+\end{subfigure}
+\caption{(a) Scale count moves the floor and autoencoder size does not. (b) Codebook utilization,
+with zero dead codes.}
+\label{fig:vqsizefloor}
 \end{figure}
 
-\figslot{F6.3 — window-invariance exhibit (REPLOT)}{Train-vs-val per-scale excess JS for all nine
-tokenizer configs, all $\leq 1.4\times10^{-2}$.}
+% =====================================================================
+\section{Choice of support mask}
+\label{app:mask}
 
-\figslot{F6.4 — schedule causal chain (REPLOT/pulled per-scale-temp arms)}{Tokenizer per-scale entropy
-profile $\to$ derived fine-heat schedule $\to$ outcome vs swept best-$T$ with the 7/7/1 tally.}
+% Why per-position is the default: a story about both failure directions. The line the
+% appendix argues: a bad mask does not give a stable rollout; it gives a choice of failure.
 
-\figslot{F6.5 — regret distribution (REPLOT)}{EMD and spectral regret of the zero-shot $T$ against the
-per-cell swept optimum; median annotated.}
+Without a position-level constraint, sampling occasionally emits a token never seen at
+that position. The decoder maps it to high-frequency static, the next step conditions on
+the static, and the rollout explodes within tens of steps. In 21 of 25 unconstrained sc341
+trajectories the rollout ends this way (Figure~\ref{fig:modea}), with a stationary
+position-OOD rate of 0.5\% avalanching to 30\% locked to the explosion and the violations
+concentrated at the fine scales. No mask of any granularity prevents the diffusive
+collapse, since every cold arm degrades whatever the constraint (EMD 0.42--0.65;
+Table~\ref{tab:maskablation}). The two failures have opposite token-space signatures,
+off-support and loud against in-support and quiet, which is why they cannot share a
+detector.
 
-\figslot{F6.6 — adaptive-sampler negative control (REBUILD from inference\_samplers.csv)}{data\_mix /
-calibration-gate / drift\_warm vs the swept-$T$ yardstick.}
+The per-position mask makes the explosion structurally impossible: survival on the
+pre-era cell goes from 0--4\% to 100\% (Figure~\ref{fig:survival}), and the OOD counter
+becomes an exact alarm. On credit assignment (Figure~\ref{fig:maskablation}), a
+noise-trained model respects scale-level support on its own ($1.5{\times}10^{-6}$
+violations per token) but not position-level support (a stationary $3.5{\times}10^{-3}$,
+touching 96\% of frames). A per-scale mask leaves that rate unchanged, and only the
+per-token mask closes it, exactly.
 
-% F6.7 cost table: sweep H100-hours (T grid x 128 traj x 2000 steps x 45 cells, from sacct) vs
-% data-read cost (one pass over tokenized train set + one teacher-forced eval).
-% PENDING: sacct dump (~/sacct_gpuhours_dump.txt) -> parse -> table.
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.68\linewidth]{mode_diagnostics/survival_beforeafter}
+\caption{Survival before and after the per-position mask and substitution noise on the same sc341
+cell, 25 trajectories per arm. Every pre-era arm dies (0--4\% by step 2000) and every masked arm survives to the
+horizon. The pre-era arms also lack substitution noise, so mask and noise are jointly
+credited here, and the ablation of Figure~\ref{fig:maskablation} separates them. The
+survival bar, an EMD of twice the tokenizer floor, over-flags low-floor tokenizers and is
+used only here.}
+\label{fig:survival}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\linewidth]{mask_ablation_ood/ood_rate_traces}\\[6pt]
+\includegraphics[width=0.98\linewidth]{mask_ablation_ood/mask_ablation_spectra}
+\caption{Mask-granularity ablation. Three arms on one sc917 cell with identical training,
+including 0.10 substitution noise, rolled out cold and warm. Top: position-OOD emission.
+The per-scale mask overlays no-mask, and per-token is exactly zero. Bottom left: the warm
+spectra coincide. Bottom right: pixel PDFs; the cold arms (dashed) over-sharpen regardless
+of mask. Temperature separates the outcomes, and the mask contributes the guarantee and
+the alarm.}
+\label{fig:maskablation}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\caption{Rollout EMD per arm of the mask ablation (tokenizer floor 0.106). The warm arms are all
+healthy while their OOD behavior differs by three orders of magnitude, and cold sampling
+collapses all three.}
+\label{tab:maskablation}
+\begin{tabular}{lccc}
+\toprule
+ & no mask & per-scale & per-token \\
+\midrule
+warm $T{=}1.6$, EMD          & 0.212 & 0.165 & 0.182 \\
+cold $T{=}0.7$, EMD          & 0.645 & 0.566 & 0.421 \\
+warm pos-OOD rate (/token)   & $3.5{\times}10^{-3}$ & $4.4{\times}10^{-3}$ & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 % =====================================================================
-\section{Why discreteness: the spectral cost is paid once (M5)}
-\label{sec:continuous}
+\section{Secondary results and deferred comparisons}
+\label{app:secondary}
 
-The mechanism claim is about where the representation's spectral bias enters the recursion. A
-continuous autoregressive model applies its biased operator to its own output at every step, so the
-bias compounds with horizon. A discrete-latent model's AR core never touches the continuous
-representation; the decoder, which carries the bias, runs once at readout, so the spectral cost is a
-fixed property of the tokenizer, independent of horizon. \citet{lippe2023pderefiner} patch the
-compounding numerically, with tuned refinement; the discrete route removes the compounding
-structurally, untuned.
+As controls on the calibration, we tried anchoring the emitted-token entropy to the
+model's own predictive entropy instead of the training-set entropy. This solves to
+$T_k \approx 1$ identically, since a sampler that restores the model's own entropy cannot
+warm by construction. The cross-entropy anchor of Section~\ref{sec:gate}, which matches
+the softmax entropy to the teacher-forced cross-entropy per scale, is the strongest
+teacher-forced variant, and it fails for the reason measured there. The
+seven single-step-adaptive samplers give the same negative in its broadest form. The arms
+are three entropy-targeting homeostats in the style of Mirostat \citep{basu2021mirostat},
+aimed at the pooled marginal, the per-position marginal, and the model's own predictive
+entropy, top-H \citep{baghaeipotraghloo2025toph}, typical sampling
+\citep{meister2023typical}, min-p \citep{nguyen2025minp}, and an entropy-dependent
+temperature with inverted polarity \citep{zhang2024edt}. At scales whose conditional
+entropy is near zero there is nothing for an adaptive gate to fire on
+(an exemplar field is in Figure~\ref{fig:singlestep}).
+% PROSE NOTE (07-21, installed 08-25): this is the reader's ONLY meeting with these
+% samplers. Arm -> cite map (verified against samplers.py): etpool/etpos/etmodel ->
+% basu2021mirostat (entropy-target homeostat), tophabs -> baghaeipotraghloo2025toph,
+% typical -> meister2023typical, minp -> nguyen2025minp, invedt -> zhang2024edt
+% (inverted polarity); top-k/top-p ancestral -> fan2018hierarchical/holtzman2020degeneration.
 
-We instrument this with architecture-matched continuous baselines: the same ViT autoencoder wired
-end-to-end as a pixel-space next-frame regressor (the quantization stripped, so quantize-or-not and
-regress-or-classify are the only changed variables), with plain MSE, input-noise, and pushforward
-training variants. One-step predictions are excellent everywhere (EMD 0.019--0.034). Closed-loop, the
-variants fail in complementary directions: the plain regressor accumulates high-$k$ energy (tail
-retention $1.5\times$ ground truth on average, with trajectories reaching EMD 1.39), while the
-pushforward-stabilized one equilibrates into a smoothed attractor, holding a stationary tail deficit
-of 0.54 for all 2{,}000 steps. Neither drifts off to infinity and neither holds the spectrum; the
-per-step bias is conserved, only its sign is negotiable. We state the discrete side of the comparison
-carefully. The tokenizer floor is also a tail deficit (Table~\ref{tab:reconfloor}), but it is a
-constant of the representation: the token-space rollout's decoded spectrum sits at the floor at step
-10 and at step 2{,}000, because no operator is iterated in the continuous domain.
-% PENDING: B1 continuous-latent arm (jobs 41968728-33) — z_{t+1}=f(z_t) regression on the frozen
-% encoder/decoder, sigma in {0, 0.01, 0.1} noise rows; F7.1 flagship panel below.
-% PENDING: flat-NSP dynamics (whether discreteness alone, without scales, suffices for stability).
+Figures~\ref{fig:global917} and~\ref{fig:global341} are the sc917 and sc341 analogs of
+the Figure~\ref{fig:schedule} grid, built the same way from the global-temperature sweep.
+sc917 behaves like sc1941. Greedy decoding is above the swept optimum, the swept
+temperature with the lowest ensemble EMD on the cell, by 0.04 to 1.71 EMD on 14 of its 15
+cells and explodes on 2, the cold sweep edge ($T{=}1.2$) is above the swept optimum by a
+median 0.17 EMD (0.05 to 0.53), and the calibrated read rounded to the nearest swept
+temperature is within 0.08 EMD of the swept optimum on 10 cells and above it by 0.15 to
+0.57 on the other 5. sc341 is the mirror image
+and is stable cold. Greedy decoding is within 0.08 EMD of the swept optimum on 14 of its
+15 cells, below it on 5 of them, and dips below the tokenizer floor by mode-averaging,
+while the calibrated read is warmer than the swept optimum
+and stays on-manifold. The EMD regret of the read is largest on this family: median 0.26
+against 0.14 on sc917 and 0.13 on sc1941 (Figure~\ref{fig:regret}).
 
-\figslot{F7.1 — high-$k$ band energy vs rollout step, discrete vs continuous (PENDING B1; B2 traces
-HAVE in artifacts/baselines/)}{Discrete: flat at tokenizer floor, horizon-independent.
-Continuous-latent (B1): accumulation or decay. Pixel (B2): plain accumulates, pushforward equilibrates
-at 0.54 retention.}
+A stochastic sampler gives ensembles from a fixed initial condition for free, where
+deterministic surrogates need IC perturbation and inherit its arbitrariness. Concentration
+(Section~\ref{sec:baselines}) makes such an ensemble interpretable: a single rollout's
+windowed estimate of the long-run statistics converges at a known rate
+(an autocorrelation time of 7--34 steps), so the spread across seeds measures sampling
+uncertainty rather than slow wander. The figures behind the metric protocol of
+Section~\ref{sec:metrics} are the per-temperature snapshot rows (Figure~\ref{fig:temprows})
+and the (cell,\,$T$) phase diagram whose stars are the calibrated reads
+(Figure~\ref{fig:phasediagram}). The banded concentration panels
+(Figure~\ref{fig:bandedconc}), the mechanism behind Figure~\ref{fig:concentration}, show
+the low-$k$ band-energy ratio held between 1.04 and 1.14 for 2{,}000 steps at the
+calibrated $T$, the mid and high bands settling within ${\sim}50$ steps and stationary
+thereafter, and per-trajectory long-run mid-$k$ states spanning 0.57--0.61 for the
+calibrated discrete arm against 0.91--1.69 for pushforward. The forecast-optimal temperature is cold, at the cold edge of the swept
+bracket and so only a lower bound, while the long-run optimum is warm.
+% SPLIT RESOLVED (user, 08-03): rerun on a pure validation window, no changes;
+% forecast evals included.
+Twelve sc341 cells roll out below their own tokenizer floor by mode-averaging, and sc917
+and sc1941 never do.
 
-\figslot{F7.3 — supporting rollout-spectra grids (HAVE)}{Discrete rollouts hold the GT spectrum for
-2{,}000 steps across the grid.}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{calibration_gate/calib_gate_negative}
+\caption{The strongest single-step anchor (CE matching), measured. Left: the solved per-scale
+temperatures stay at $T\leq 1$, against the shaded bands of the swept best-$T$ ranges.
+Right: the solved $T_{\text{eff}}$ against the swept best-$T$ per cell. sc341 passes, and
+the warm configurations miss by a full temperature unit.}
+\label{fig:calibgate}
+\end{figure}
 
-% =====================================================================
-\section{Secondary findings}
-\label{sec:secondary}
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{per_scale_temp/global_outcome_sc917}
+\caption{The sc917 analog of Figure~\ref{fig:schedule}, from the global-temperature sweep (greedy
+$N{=}1$, sampled arms $N{=}128$). Greedy and the cold sweep edge are above the swept
+best-$T$ yardstick on EMD and have the largest TKE spectral error, and the calibrated global
+read (rounded to the nearest swept temperature) is on the yardstick on 10 of the 15 cells.
+This figure shows the original sweep range, whose hot edge on this family is $T{=}2.0$, so
+the over-heat failure is not resolved here. The hotter points added to six sc917 cells are
+in Figure~\ref{fig:phasediagram}.}
+\label{fig:global917}
+\end{figure}
 
-Three results survive to this section on one figure each; full grids are in the appendix.
-\textbf{Scaling.} Across the 45-cell grid the data-limited compute optimum sits at
-$D_{\text{uniq}}/P\approx0.54$ unique tokens per parameter, roughly $20\times$ tighter than the text
-regime \citep{hoffmann2022chinchilla,muennighoff2023scaling}, and long-rollout EMD saturates with
-model size well before the token budget saturates.
-\textbf{Climate vs forecast temperature split.} The temperature that optimizes short-lead forecasts is
-cold (0.8--1.0, pinned at our bracket edge, so a lower bound) while the climate optimum is warm
-(1.6--2.2): anti-collapse warmth is a long-horizon phenomenon.
-\textbf{Below-floor EMD.} sc341 rollouts can undercut their own tokenizer's reconstruction EMD; a
-time-varying AR sequence averages out quantization mode-sharpening. sc917 does not show the effect,
-and we do not explain it.
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{per_scale_temp/global_outcome_sc341}
+\caption{The sc341 analog of Figure~\ref{fig:schedule}. This family is stable cold. Greedy and the
+cold edge are within 0.12 EMD of the swept optimum on 14 of the 15 cells and dip below the
+tokenizer floor by mode-averaging, while the calibrated read
+is warmer than the swept optimum and stays on-manifold, so the read's regret, its EMD
+above the swept optimum's, is largest on this family. The hot edge ($T{=}3.0$) shows the spectral camouflage at its
+starkest, with EMD at the explosion bar and the lowest TKE error of any arm.}
+\label{fig:global341}
+\end{figure}
 
-\figslot{F8.1--F8.3 (REPLOT from scaling\_tempopt\_n128/ and forecast sweep)}{One distilled figure per
-finding.}
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{phase_diagram/phase_diagram_v1}
+\caption{Temperature phase diagram. Every (cell, $T$) point of the $N{=}128$ sweep, colored by the
+decoded tail energy relative to the tokenizer floor (the wavenumbers beyond the resolved
+range); points whose ensemble EMD exceeds the explosion bar of 1.0 are crossed out. Per
+cell, the open circle is the swept EMD-argmin and the star is the calibrated read.
+The read lies inside the non-exploded interval in 42 of the 45 cells and between the
+hottest non-exploded and the first exploded swept temperature in the other three, and is
+warmer than the argmin in 43 of the 45. The finest-two-scale entropy gap $\Delta H$ has
+rank correlation 0.87 with the tail energy relative to the floor across the 326 points,
+and the star is its zero crossing.}
+\label{fig:phasediagram}
+\end{figure}
 
-% =====================================================================
-\section{Related work}
-\label{sec:related}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.62\linewidth]{regret/regret_distribution}
+\caption{The EMD regret of the read. Per-family ECDFs of regret, the ensemble EMD at the read
+minus the ensemble EMD at the cell's swept optimum. The median is 0.19 over all 45 cells: 0.26 on sc341, where the read is warmer
+than the EMD-argmin in every cell while the rollout stays on-manifold, 0.14 on sc917, and
+0.13 on sc1941.}
+\label{fig:regret}
+\end{figure}
 
-\textbf{Discretize-and-autoregress.} \citet{ansari2024chronos} quantize scalar time series into a
-fixed vocabulary and forecast with an off-the-shelf language model; the motivation is ours, the
-representation is not (fixed scalar binning, no spatial or scale structure). \citet{tian2024var}
-introduce next-scale prediction over a multi-scale residual VQ for images; we take the mechanism to
-PDE dynamics, where the autoregression is in time and the stability question is statistical.
-\textbf{Discrete PDE surrogates.} \citet{serrano2024zebra} and \citet{nguyen2025physix} tokenize PDE
-states for in-context and foundation-model use; \citet{momenifar2021dimension} compress turbulence
-with VQ. None studies multi-thousand-step climate stability, support masking, or sweep-free sampling
-calibration.
-\textbf{Continuous stability patches.} \citet{stachenfeld2022learned} inject training noise;
-\citet{brandstetter2022mppde} unroll one step with a detached gradient; \citet{lippe2023pderefiner}
-learn an iterative spectral refiner. These are the tuned numerical margins the discrete route
-replaces, and our substitution noise is the honest discrete cousin of the first two.
-\textbf{Scaling.} \citet{hoffmann2022chinchilla,henighan2020scaling,muennighoff2023scaling} give the
-text-regime compute optima against which our $D/P$ measurement sits.
-\textbf{Latent world models.} Discrete-latent imagination \citep{hafner2023dreamerv3,yan2023teco} and
-self-predictive representations \citep{schwarzer2021spr} are the lineage for the latent-rollout
-extensions we leave to future work.
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.62\linewidth]{baselines/flat_nsp_verdict}
+\caption{The flat-NSP dynamics verdict. Ensemble EMD over 2{,}000-step rollouts against sampling
+temperature for two NSP sizes trained on flat-1024 tokens, with the flat-1024
+reconstruction floor. Flat holds the horizon at a swept $T{=}1.6$, essentially at floor and
+level with the matched-budget multi-scale best (star: medium-sc917 at its swept optimum,
+EMD 0.119). Cold and hot degrade in the familiar directions, confirmed on snapshots and
+pixel PDFs (warm arms fully turbulent, cold arms smoothed). The scale axis is an
+instrument and not a stabilizer, and flat has no per-scale readout, so its temperature
+came from the sweep.}
+\label{fig:flatnsp}
+\end{figure}
 
-% =====================================================================
-\section{Limitations and open questions}
-\label{sec:limitations}
-
-One system: every claim is scoped to this 2D turbulence dataset, and the transfer we demonstrate is
-across model and tokenizer configurations within it, not across PDEs. The zero-shot rung buys safety,
-not optimality; its regret is quantified in Section~\ref{sec:calibration}, and a sampler that is both
-zero-shot and optimal remains open. The substitution rate is 0.10 everywhere, unswept. The
-deterministic-argmax spectral cost is stated but not ablated against sampled quantization. The sc917
-below-floor absence is unexplained. The forecast-optimal temperature is a bracket-edge lower bound.
-Whether flat tokens support stable long dynamics is under test as we write; either answer sharpens
-Section~\ref{sec:whyscales}, and we will report the one we get.
-
-% =====================================================================
-\section{Conclusion}
-\label{sec:conclusion}
-
-Discreteness does not make a turbulence surrogate stable; it makes instability countable. A finite
-vocabulary rules out grey-out, a per-token support mask closes the marginal escape route, and the one
-remaining knob is read from the training data instead of swept. Each layer is licensed by the
-measured failure of the previous one, each intervention is derived once rather than tuned per model,
-and the resulting rollouts hold the climate of a chaotic flow for two thousand steps across every
-configuration we trained.
-
-\bibliography{references}
-\bibliographystyle{tmlr}
-
-\appendix
-
-\section{Appendix (assembly pending)}
-% Full N=128 tables + per-cell grids; per-scale-temp six-arm replication grid; sc341/sc917 report
-% grids; 27-cell T=1 snapshots; hyperparameters; compute/infra (Bridges2/Derecho, Slurm/PBS);
-% DiVeQ failure note; NextLat aux-loss future-work note; reproducibility (figures regenerate from
-% repo plot_*.py / analyze_*.py; plots/README.md maps every dir to its producing script).
+% Also to assemble here later: full N=128 tables; per-scale-temp replication grid; report grids;
+% E2 full per-arm table; hyperparameters; compute/infra; cost table (sacct, BLOCKED); DiVeQ
+% failure note; NextLat note; reproducibility (plots/README.md maps every figure to its script).
 
 \end{document}
